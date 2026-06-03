@@ -1,0 +1,9 @@
+faster-whisper
+sounddevice
+numpy
+pyperclip
+pynput
+rumps
+Pillow
+py2app
+pyobjc-framework-ApplicationServices

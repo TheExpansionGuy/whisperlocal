@@ -1,0 +1,57 @@
+from setuptools import setup
+
+APP = ["main.py"]
+DATA_FILES = [
+    ("", ["overlay.py"]),
+    ("assets", [
+        "assets/menubar.png",
+        "assets/menubar@2x.png",
+        "assets/menubar_rec.png",
+        "assets/menubar_rec@2x.png",
+        "assets/menubar_proc.png",
+        "assets/menubar_proc@2x.png",
+    ]),
+]
+OPTIONS = {
+    "argv_emulation": False,
+    "iconfile": "assets/icon.icns",
+    "plist": {
+        "CFBundleName": "WhisperLocal",
+        "CFBundleDisplayName": "WhisperLocal",
+        "CFBundleIdentifier": "com.whisperlocal.app",
+        "CFBundleVersion": "1.0.0",
+        "CFBundleShortVersionString": "1.0",
+        "LSUIElement": True,
+        "NSMicrophoneUsageDescription": (
+            "WhisperLocal records audio to transcribe your speech locally."
+        ),
+        "NSAppleEventsUsageDescription": (
+            "WhisperLocal uses System Events to paste transcribed text into the active app."
+        ),
+    },
+    "packages": [
+        "faster_whisper",
+        "sounddevice",
+        "_sounddevice_data",
+        "numpy",
+        "rumps",
+        "pynput",
+        "pyperclip",
+        "ctranslate2",
+        "tokenizers",
+        "huggingface_hub",
+        "ApplicationServices",
+        "AppKit",
+        "Foundation",
+    ],
+    "excludes": ["tkinter", "matplotlib", "scipy", "PIL"],
+    "strip": False,
+}
+
+setup(
+    name="WhisperLocal",
+    app=APP,
+    data_files=DATA_FILES,
+    options={"py2app": OPTIONS},
+    setup_requires=["py2app"],
+)
