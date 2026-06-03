@@ -60,6 +60,7 @@ class _IndicatorView(NSView):
         if self is None: return None
         self._state = "idle"
         self._phase = 0.0
+        self.setWantsLayer_(False)
         return self
 
     def isOpaque(self): return False
@@ -104,6 +105,7 @@ class _WaveformView(NSView):
         if self is None: return None
         self._levels = [0.02] * 52
         self._active = False
+        self.setWantsLayer_(False)
         return self
 
     def isOpaque(self): return False
@@ -252,6 +254,7 @@ class OverlayPanel(NSObject):
         tv.setFont_(NSFont.systemFontOfSize_weight_(13.0, 0.2))
         tv.textContainer().setLineFragmentPadding_(0)
         tv.setAlignment_(NSTextAlignmentCenter)
+        tv.setWantsLayer_(False)
         root.addSubview_(tv)
         self._textview = tv
 

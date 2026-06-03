@@ -100,22 +100,34 @@ class WhisperLocal(rumps.App):
     # ------------------------------------------------------------------
 
     def _request_accessibility(self):
-        """Prompt only if Accessibility has not already been granted."""
+        """Prompt if not trusted, then watch in background and restart listener when granted."""
         try:
             import ApplicationServices as AS
-            # Check without prompting first
             if AS.AXIsProcessTrustedWithOptions({AS.kAXTrustedCheckOptionPrompt: False}):
-                return
-            # Not trusted — open the prompt once
+                return  # already trusted
             AS.AXIsProcessTrustedWithOptions({AS.kAXTrustedCheckOptionPrompt: True})
             rumps.notification(
                 "WhisperLocal",
                 "Accessibility required",
-                "Grant access in System Settings → Privacy & Security → Accessibility, then relaunch.",
+                "Grant access in System Settings → Privacy & Security → Accessibility.",
                 sound=False,
             )
+            threading.Thread(target=self._watch_accessibility, daemon=True).start()
         except Exception:
             pass
+
+    def _watch_accessibility(self):
+        """Poll until Accessibility is granted, then restart the listener — no relaunch needed."""
+        import ApplicationServices as AS
+        while True:
+            time.sleep(1.5)
+            try:
+                if AS.AXIsProcessTrustedWithOptions({AS.kAXTrustedCheckOptionPrompt: False}):
+                    self._start_listener()
+                    rumps.notification("WhisperLocal", "Ready", "Hold ⌥ to start dictating.", sound=False)
+                    return
+            except Exception:
+                pass
 
     # ------------------------------------------------------------------
     # Menu construction
@@ -220,11 +232,16 @@ class WhisperLocal(rumps.App):
     # ------------------------------------------------------------------
 
     def _start_listener(self):
-        listener = keyboard.Listener(
+        if hasattr(self, "_listener") and self._listener and self._listener.is_alive():
+            try:
+                self._listener.stop()
+            except Exception:
+                pass
+        self._listener = keyboard.Listener(
             on_press=self._on_press, on_release=self._on_release
         )
-        listener.daemon = True
-        listener.start()
+        self._listener.daemon = True
+        self._listener.start()
 
     def _on_press(self, key):
         # Escape or second Option tap cancels
