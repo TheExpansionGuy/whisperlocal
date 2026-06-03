@@ -156,22 +156,27 @@ def _smooth_extend(path, pts):
 
 
 # ---------------------------------------------------------------------------
-# Root view — draws the pill shape for the entire panel
+# Root view — layer-backed pill so all subviews are clipped to rounded corners
 # ---------------------------------------------------------------------------
 class _PillView(NSView):
+    def initWithFrame_(self, frame):
+        self = objc.super(_PillView, self).initWithFrame_(frame)
+        if self is None: return None
+        # Layer-backed: clips every subview to the pill shape automatically
+        self.setWantsLayer_(True)
+        self.layer().setCornerRadius_(CORNER)
+        self.layer().setMasksToBounds_(True)
+        # Background via layer (avoids drawRect_ fighting with layer compositing)
+        self.layer().setBackgroundColor_(BG.CGColor())
+        # Subtle border ring via layer border
+        self.layer().setBorderWidth_(1.0)
+        self.layer().setBorderColor_(RING.CGColor())
+        return self
+
     def isOpaque(self): return False
 
     def drawRect_(self, rect):
-        # Full rounded pill
-        pill = NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
-            rect, CORNER, CORNER)
-        BG.setFill(); pill.fill()
-        # Border
-        inset = NSMakeRect(0.5, 0.5, rect.size.width-1, rect.size.height-1)
-        border = NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
-            inset, CORNER-0.5, CORNER-0.5)
-        border.setLineWidth_(1.0); RING.setStroke(); border.stroke()
-        # Divider above pill strip (only when taller than PILL_H)
+        # Only draw the divider — background and border handled by layer
         if rect.size.height > PILL_H + 2:
             div = NSBezierPath.bezierPath()
             div.moveToPoint_(NSMakePoint(PAD, PILL_H))

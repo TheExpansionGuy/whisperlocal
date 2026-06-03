@@ -152,6 +152,10 @@ class WhisperLocal(rumps.App):
         filler_item.state = int(self.cfg["filler_removal"])
         self.menu.add(filler_item)
 
+        mic_item = rumps.MenuItem("Microphone")
+        self._build_mic_menu(mic_item)
+        self.menu.add(mic_item)
+
         self.menu.add(rumps.separator)
         self.menu.add(rumps.MenuItem("Check Accessibility…", callback=self._open_accessibility))
         self.menu.add(rumps.separator)
@@ -193,6 +197,40 @@ class WhisperLocal(rumps.App):
         self.cfg["filler_removal"] = not self.cfg["filler_removal"]
         sender.state = int(self.cfg["filler_removal"])
         save_config(self.cfg)
+
+    def _build_mic_menu(self, parent):
+        parent.clear() if hasattr(parent, "_menu") and parent._menu else None
+        try:
+            devices = sd.query_devices()
+            inputs = [(i, d["name"]) for i, d in enumerate(devices)
+                      if d["max_input_channels"] > 0]
+        except Exception:
+            inputs = []
+
+        saved = self.cfg.get("input_device")
+
+        # Default option
+        item = rumps.MenuItem("System Default", callback=self._set_mic)
+        item._device_index = None
+        item.state = int(saved is None)
+        parent.add(item)
+
+        for idx, name in inputs:
+            label = name if len(name) <= 48 else name[:45] + "…"
+            item = rumps.MenuItem(label, callback=self._set_mic)
+            item._device_index = idx
+            item.state = int(saved == idx)
+            parent.add(item)
+
+    def _set_mic(self, sender):
+        self.cfg["input_device"] = sender._device_index
+        save_config(self.cfg)
+        for item in self.menu["Microphone"].values():
+            if hasattr(item, "_device_index"):
+                item.state = int(item._device_index == sender._device_index)
+        # Stop any active recording so next press uses new device
+        if self.recording:
+            self._cancel()
 
     def _copy_history(self, sender):
         pyperclip.copy(sender._full_text)
@@ -262,6 +300,7 @@ class WhisperLocal(rumps.App):
         self._overlay.show_async()
         self._overlay.push_state("recording")
         self.stream = sd.InputStream(
+            device=self.cfg.get("input_device"),
             samplerate=SAMPLE_RATE,
             channels=1,
             dtype="float32",
