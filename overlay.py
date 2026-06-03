@@ -1,25 +1,26 @@
-"""Pill overlay — grows upward as transcript builds, truly transparent window."""
+"""Pill overlay — all text drawn via custom NSView, no NSTextField/NSTextView layer artifacts."""
 import math
 import time
 import objc
 from AppKit import (
     NSBorderlessWindowMask, NSBezierPath, NSColor, NSFont,
-    NSMakeRect, NSNonactivatingPanelMask, NSPanel, NSScreen,
-    NSTextField, NSTextView, NSScrollView,
+    NSMakeRect, NSNonactivatingPanelMask, NSPanel, NSScreen, NSView,
+    NSForegroundColorAttributeName, NSFontAttributeName,
+    NSParagraphStyleAttributeName, NSMutableParagraphStyle,
     NSTextAlignmentCenter, NSTextAlignmentLeft, NSTextAlignmentRight,
-    NSView, NSFocusRingTypeNone, NSViewWidthSizable, NSViewHeightSizable,
+    NSLineBreakByTruncatingTail, NSLineBreakByWordWrapping,
 )
-from Foundation import NSMakePoint, NSMakeSize, NSObject, NSTimer, NSMutableAttributedString, NSAttributedString
+from Foundation import NSMakePoint, NSMakeSize, NSObject, NSTimer, NSString
 
 # ---------------------------------------------------------------------------
-# Constants
+# Layout
 # ---------------------------------------------------------------------------
 PANEL_W   = 600
-PILL_H    = 52       # fixed bottom strip height
+PILL_H    = 52
 MAX_LINES = 6
 LINE_H    = 20
 TEXT_PAD_V = 10
-TEXT_PAD_H = 20
+TEXT_PAD_H = 22
 BOTTOM    = 64
 CORNER    = 26.0
 FPS       = 30
@@ -39,16 +40,73 @@ DIM     = _c(0.50, 0.50, 0.52, 1.0)
 DIVIDER = _c(1.00, 1.00, 1.00, 0.08)
 RING    = _c(1.00, 1.00, 1.00, 0.09)
 
-# Pill row layout
-PAD    = 18
-IND_W  = 22
-IND_X  = PAD
-TMR_W  = 46
-TMR_X  = PANEL_W - PAD - TMR_W
-LBL_W  = 82
-LBL_X  = TMR_X - LBL_W - 6
-WAV_X  = IND_X + IND_W + 12
-WAV_W  = LBL_X - WAV_X - 8
+PAD   = 18
+IND_W = 22; IND_X = PAD
+TMR_W = 46; TMR_X = PANEL_W - PAD - TMR_W
+LBL_W = 82; LBL_X = TMR_X - LBL_W - 6
+WAV_X = IND_X + IND_W + 12
+WAV_W = LBL_X - WAV_X - 8
+
+
+# ---------------------------------------------------------------------------
+# Custom text label — draws directly, zero AppKit control chrome
+# ---------------------------------------------------------------------------
+class _Label(NSView):
+    def initWithFrame_(self, frame):
+        self = objc.super(_Label, self).initWithFrame_(frame)
+        if self is None: return None
+        self._text  = ""
+        self._color = WHITE
+        self._font  = NSFont.systemFontOfSize_(13.0)
+        self._align = NSTextAlignmentLeft
+        self._wrap  = False
+        return self
+
+    @classmethod
+    def make(cls, x, y, w, h, text="", color=None, size=13.0,
+             weight=0.2, align="left", wrap=False):
+        v = cls.alloc().initWithFrame_(NSMakeRect(x, y, w, h))
+        v._text  = text
+        v._color = color or WHITE
+        v._font  = NSFont.systemFontOfSize_weight_(size, weight)
+        v._align = {"left": NSTextAlignmentLeft,
+                    "right": NSTextAlignmentRight,
+                    "center": NSTextAlignmentCenter}[align]
+        v._wrap  = wrap
+        return v
+
+    def isOpaque(self): return False
+
+    def setText_(self, text):
+        self._text = text or ""
+        self.setNeedsDisplay_(True)
+
+    def _attrs(self):
+        style = NSMutableParagraphStyle.alloc().init()
+        style.setAlignment_(self._align)
+        style.setLineBreakMode_(
+            NSLineBreakByWordWrapping if self._wrap else NSLineBreakByTruncatingTail
+        )
+        return {
+            NSForegroundColorAttributeName: self._color,
+            NSFontAttributeName: self._font,
+            NSParagraphStyleAttributeName: style,
+        }
+
+    def drawRect_(self, rect):
+        if not self._text:
+            return
+        attrs = self._attrs()
+        s = NSString.stringWithString_(self._text)
+        if self._wrap:
+            s.drawInRect_withAttributes_(rect, attrs)
+        else:
+            # Vertically centre single line
+            sz = s.sizeWithAttributes_(attrs)
+            y  = (rect.size.height - sz.height) / 2
+            s.drawInRect_withAttributes_(
+                NSMakeRect(0, y, rect.size.width, sz.height), attrs
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -60,40 +118,35 @@ class _IndicatorView(NSView):
         if self is None: return None
         self._state = "idle"
         self._phase = 0.0
-        self.setWantsLayer_(False)
         return self
 
     def isOpaque(self): return False
 
     def setState_(self, s):
-        self._state = s
-        self.setNeedsDisplay_(True)
+        self._state = s; self.setNeedsDisplay_(True)
 
     def setPhase_(self, p):
-        self._phase = p
-        self.setNeedsDisplay_(True)
+        self._phase = p; self.setNeedsDisplay_(True)
 
     def drawRect_(self, rect):
-        cx = rect.size.width / 2
-        cy = rect.size.height / 2
+        cx = rect.size.width / 2; cy = rect.size.height / 2
         if self._state == "recording":
             pulse = 0.5 + 0.5 * math.sin(self._phase * 2 * math.pi)
             rr = 9 + 5 * pulse
             _c(1.0, 0.27, 0.23, 0.20 * (1 - pulse)).setFill()
             NSBezierPath.bezierPathWithOvalInRect_(
-                NSMakeRect(cx - rr, cy - rr, rr * 2, rr * 2)).fill()
+                NSMakeRect(cx-rr, cy-rr, rr*2, rr*2)).fill()
             RED.setFill()
             NSBezierPath.bezierPathWithOvalInRect_(
-                NSMakeRect(cx - 7, cy - 7, 14, 14)).fill()
+                NSMakeRect(cx-7, cy-7, 14, 14)).fill()
         elif self._state == "transcribing":
-            spacing = 9.0; dot_r = 3.0; x0 = cx - spacing
+            sp=9.0; dr=3.0; x0=cx-sp
             for i in range(3):
-                t = (self._phase + i / 3.0) % 1.0
-                dy = -5 * math.sin(t * math.pi) if t < 1.0 else 0
+                t = (self._phase + i/3.0) % 1.0
+                dy = -5*math.sin(t*math.pi) if t < 1.0 else 0
                 DIM.setFill()
                 NSBezierPath.bezierPathWithOvalInRect_(
-                    NSMakeRect(x0 + i * spacing - dot_r,
-                               cy - dot_r + dy, dot_r * 2, dot_r * 2)).fill()
+                    NSMakeRect(x0+i*sp-dr, cy-dr+dy, dr*2, dr*2)).fill()
 
 
 # ---------------------------------------------------------------------------
@@ -103,72 +156,57 @@ class _WaveformView(NSView):
     def initWithFrame_(self, frame):
         self = objc.super(_WaveformView, self).initWithFrame_(frame)
         if self is None: return None
-        self._levels = [0.02] * 52
-        self._active = False
-        self.setWantsLayer_(False)
+        self._levels = [0.02]*52; self._active = False
         return self
 
     def isOpaque(self): return False
 
-    def setLevels_(self, lvl):
-        self._levels = list(lvl)
-        self.setNeedsDisplay_(True)
-
-    def setActive_(self, a):
-        self._active = a
-        self.setNeedsDisplay_(True)
+    def setLevels_(self, l): self._levels=list(l); self.setNeedsDisplay_(True)
+    def setActive_(self, a): self._active=a; self.setNeedsDisplay_(True)
 
     def drawRect_(self, rect):
-        w, h = rect.size.width, rect.size.height
-        cy = h / 2
-        n = len(self._levels)
+        w,h = rect.size.width, rect.size.height; cy=h/2; n=len(self._levels)
         if n < 2: return
-        xs  = [i * w / (n - 1) for i in range(n)]
-        amp = cy * 0.84
-        top = [(xs[i], cy - self._levels[i] * amp) for i in range(n)]
-        bot = [(xs[i], cy + self._levels[i] * amp) for i in range(n - 1, -1, -1)]
+        xs  = [i*w/(n-1) for i in range(n)]
+        amp = cy*0.84
+        top = [(xs[i], cy-self._levels[i]*amp) for i in range(n)]
+        bot = [(xs[i], cy+self._levels[i]*amp) for i in range(n-1,-1,-1)]
         (BLUE if self._active else DIM).setFill()
-        p = _smooth_path(top)
-        _smooth_extend(p, bot)
-        p.closePath(); p.fill()
+        p = _catmull(top); _catmull_ext(p, bot); p.closePath(); p.fill()
 
 
-def _smooth_path(pts):
-    path = NSBezierPath.bezierPath()
-    n = len(pts)
+def _catmull(pts):
+    path=NSBezierPath.bezierPath(); n=len(pts)
     path.moveToPoint_(NSMakePoint(*pts[0]))
-    for i in range(1, n):
+    for i in range(1,n):
         p0=pts[max(0,i-2)]; p1=pts[i-1]; p2=pts[i]; p3=pts[min(n-1,i+1)]
         cp1=(p1[0]+(p2[0]-p0[0])/6, p1[1]+(p2[1]-p0[1])/6)
         cp2=(p2[0]-(p3[0]-p1[0])/6, p2[1]-(p3[1]-p1[1])/6)
         path.curveToPoint_controlPoint1_controlPoint2_(
-            NSMakePoint(*p2), NSMakePoint(*cp1), NSMakePoint(*cp2))
+            NSMakePoint(*p2),NSMakePoint(*cp1),NSMakePoint(*cp2))
     return path
 
-def _smooth_extend(path, pts):
-    n = len(pts)
-    for i in range(1, n):
+def _catmull_ext(path, pts):
+    n=len(pts)
+    for i in range(1,n):
         p0=pts[max(0,i-2)]; p1=pts[i-1]; p2=pts[i]; p3=pts[min(n-1,i+1)]
         cp1=(p1[0]+(p2[0]-p0[0])/6, p1[1]+(p2[1]-p0[1])/6)
         cp2=(p2[0]-(p3[0]-p1[0])/6, p2[1]-(p3[1]-p1[1])/6)
         path.curveToPoint_controlPoint1_controlPoint2_(
-            NSMakePoint(*p2), NSMakePoint(*cp1), NSMakePoint(*cp2))
+            NSMakePoint(*p2),NSMakePoint(*cp1),NSMakePoint(*cp2))
 
 
 # ---------------------------------------------------------------------------
-# Root view — layer-backed pill so all subviews are clipped to rounded corners
+# Root pill view — layer-backed so subviews clip to rounded corners
 # ---------------------------------------------------------------------------
 class _PillView(NSView):
     def initWithFrame_(self, frame):
         self = objc.super(_PillView, self).initWithFrame_(frame)
         if self is None: return None
-        # Layer-backed: clips every subview to the pill shape automatically
         self.setWantsLayer_(True)
         self.layer().setCornerRadius_(CORNER)
         self.layer().setMasksToBounds_(True)
-        # Background via layer (avoids drawRect_ fighting with layer compositing)
         self.layer().setBackgroundColor_(BG.CGColor())
-        # Subtle border ring via layer border
         self.layer().setBorderWidth_(1.0)
         self.layer().setBorderColor_(RING.CGColor())
         return self
@@ -176,11 +214,11 @@ class _PillView(NSView):
     def isOpaque(self): return False
 
     def drawRect_(self, rect):
-        # Only draw the divider — background and border handled by layer
+        # Only the divider line — pill bg/border handled by layer
         if rect.size.height > PILL_H + 2:
             div = NSBezierPath.bezierPath()
             div.moveToPoint_(NSMakePoint(PAD, PILL_H))
-            div.lineToPoint_(NSMakePoint(rect.size.width - PAD, PILL_H))
+            div.lineToPoint_(NSMakePoint(rect.size.width-PAD, PILL_H))
             div.setLineWidth_(0.5); DIVIDER.setStroke(); div.stroke()
 
 
@@ -198,7 +236,7 @@ class OverlayPanel(NSObject):
         self._waveform     = None
         self._lbl_state    = None
         self._lbl_timer    = None
-        self._textview     = None
+        self._lbl_text     = None
         self._anim_timer   = None
         self._anim_phase   = 0.0
         self._record_start = 0.0
@@ -206,112 +244,85 @@ class OverlayPanel(NSObject):
         self._transcript   = ""
         return self
 
-    # ------------------------------------------------------------------
     def _setup(self):
         sf = NSScreen.mainScreen().frame()
-        x = (sf.size.width - PANEL_W) / 2 + sf.origin.x
+        x = (sf.size.width - PANEL_W)/2 + sf.origin.x
         y = sf.origin.y + BOTTOM
 
         panel = NSPanel.alloc().initWithContentRect_styleMask_backing_defer_(
             NSMakeRect(x, y, PANEL_W, PILL_H), _STYLE, _BACKING, False)
-        panel.setLevel_(_FLOAT + 1)
+        panel.setLevel_(_FLOAT+1)
         panel.setOpaque_(False)
-        panel.setBackgroundColor_(NSColor.clearColor())   # ← key: truly transparent
+        panel.setBackgroundColor_(NSColor.clearColor())
         panel.setHasShadow_(True)
         panel.setAlphaValue_(0.0)
 
-        root = _PillView.alloc().initWithFrame_(NSMakeRect(0, 0, PANEL_W, PILL_H))
+        root = _PillView.alloc().initWithFrame_(NSMakeRect(0,0,PANEL_W,PILL_H))
         panel.setContentView_(root)
         self._root = root
 
-        cy = PILL_H / 2
-
         # Indicator
         ind = _IndicatorView.alloc().initWithFrame_(
-            NSMakeRect(IND_X, (PILL_H - IND_W) / 2, IND_W, IND_W))
-        root.addSubview_(ind)
-        self._indicator = ind
+            NSMakeRect(IND_X,(PILL_H-IND_W)/2,IND_W,IND_W))
+        root.addSubview_(ind); self._indicator = ind
 
         # Waveform
-        wf_h = 30
+        wf_h=30
         wf = _WaveformView.alloc().initWithFrame_(
-            NSMakeRect(WAV_X, (PILL_H - wf_h) / 2, WAV_W, wf_h))
-        root.addSubview_(wf)
-        self._waveform = wf
+            NSMakeRect(WAV_X,(PILL_H-wf_h)/2,WAV_W,wf_h))
+        root.addSubview_(wf); self._waveform = wf
 
-        # State label
-        sl = _lbl(LBL_X, (PILL_H-20)/2, LBL_W, 20, "", WHITE, 12.5)
-        root.addSubview_(sl)
-        self._lbl_state = sl
+        # State label ("Listening" / "Transcribing")
+        sl = _Label.make(LBL_X,(PILL_H-20)/2,LBL_W,20,
+                         color=WHITE, size=12.5, align="left")
+        root.addSubview_(sl); self._lbl_state = sl
 
-        # Timer label
-        tl = _lbl(TMR_X, (PILL_H-20)/2, TMR_W, 20, "", DIM, 12.0, right=True)
-        root.addSubview_(tl)
-        self._lbl_timer = tl
+        # Timer label ("0:08")
+        tl = _Label.make(TMR_X,(PILL_H-20)/2,TMR_W,20,
+                         color=DIM, size=12.0, align="right")
+        root.addSubview_(tl); self._lbl_timer = tl
 
-        # NSTextView for transcript (hidden until text arrives)
-        tv = NSTextView.alloc().initWithFrame_(NSMakeRect(0, 0, 0, 0))
-        tv.setEditable_(False)
-        tv.setSelectable_(False)
-        tv.setDrawsBackground_(False)
-        tv.setBackgroundColor_(NSColor.clearColor())
-        tv.setTextColor_(WHITE)
-        tv.setFont_(NSFont.systemFontOfSize_weight_(13.0, 0.2))
-        tv.textContainer().setLineFragmentPadding_(0)
-        tv.setAlignment_(NSTextAlignmentCenter)
-        tv.setWantsLayer_(False)
-        root.addSubview_(tv)
-        self._textview = tv
+        # Transcript label (grows above, starts hidden)
+        tx = _Label.make(TEXT_PAD_H, PILL_H+TEXT_PAD_V,
+                         PANEL_W-TEXT_PAD_H*2, 0,
+                         color=WHITE, size=13.0, align="center", wrap=True)
+        root.addSubview_(tx); self._lbl_text = tx
 
         self._panel = panel
 
     # ------------------------------------------------------------------
     def _updateLayout(self):
-        """Resize panel upward to fit current transcript text."""
         if not self._panel: return
-
         text = self._transcript.strip()
+
         if not text:
             text_h = 0
         else:
-            # Estimate lines needed
-            chars_per_line = int((PANEL_W - TEXT_PAD_H * 2) / 7.5)
-            words = text.split()
-            lines, cur = 1, 0
+            chars = int((PANEL_W - TEXT_PAD_H*2) / 7.5)
+            words = text.split(); lines=1; cur=0
             for w in words:
-                if cur + len(w) + 1 > chars_per_line:
-                    lines += 1; cur = len(w)
-                else:
-                    cur += len(w) + 1
-            lines = min(lines, MAX_LINES)
-            text_h = lines * LINE_H + TEXT_PAD_V * 2
+                if cur+len(w)+1 > chars: lines+=1; cur=len(w)
+                else: cur+=len(w)+1
+            text_h = min(lines, MAX_LINES)*LINE_H + TEXT_PAD_V*2
 
         total_h = PILL_H + text_h
-
-        # Keep bottom edge fixed — move y up as panel grows
         sf = NSScreen.mainScreen().frame()
-        x = (sf.size.width - PANEL_W) / 2 + sf.origin.x
-        y = sf.origin.y + BOTTOM
+        x = (sf.size.width-PANEL_W)/2+sf.origin.x
+        y = sf.origin.y+BOTTOM
 
-        self._panel.setFrame_display_(
-            NSMakeRect(x, y, PANEL_W, total_h), True)
-        self._root.setFrame_(NSMakeRect(0, 0, PANEL_W, total_h))
+        self._panel.setFrame_display_(NSMakeRect(x,y,PANEL_W,total_h), True)
+        self._root.setFrame_(NSMakeRect(0,0,PANEL_W,total_h))
+        self._root.layer().setFrame_(self._root.bounds())
 
-        # Reposition pill-row subviews (always at bottom PILL_H strip)
-        for view in [self._indicator, self._waveform, self._lbl_state, self._lbl_timer]:
-            if view:
-                f = view.frame()
-                view.setFrame_(NSMakeRect(f.origin.x, f.origin.y, f.size.width, f.size.height))
-
-        # Resize transcript view
-        if text_h > 0:
-            self._textview.setFrame_(
-                NSMakeRect(TEXT_PAD_H, PILL_H + TEXT_PAD_V,
-                           PANEL_W - TEXT_PAD_H * 2, text_h - TEXT_PAD_V * 2))
-            self._textview.setString_(text)
-        else:
-            self._textview.setFrame_(NSMakeRect(0, 0, 0, 0))
-            self._textview.setString_("")
+        if self._lbl_text:
+            if text_h > 0:
+                self._lbl_text.setFrame_(
+                    NSMakeRect(TEXT_PAD_H, PILL_H+TEXT_PAD_V,
+                               PANEL_W-TEXT_PAD_H*2, text_h-TEXT_PAD_V*2))
+                self._lbl_text.setText_(text)
+            else:
+                self._lbl_text.setFrame_(NSMakeRect(0,0,0,0))
+                self._lbl_text.setText_("")
 
         self._root.setNeedsDisplay_(True)
 
@@ -319,24 +330,23 @@ class OverlayPanel(NSObject):
     def _startTimer(self):
         if self._anim_timer: return
         self._anim_timer = NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
-            1.0 / FPS, self, "animTick:", None, True)
+            1.0/FPS, self, "animTick:", None, True)
 
     def _stopTimer(self):
         if self._anim_timer:
-            self._anim_timer.invalidate()
-            self._anim_timer = None
+            self._anim_timer.invalidate(); self._anim_timer=None
 
     def animTick_(self, _):
-        self._anim_phase = (self._anim_phase + 1.0 / FPS) % 1.0
+        self._anim_phase = (self._anim_phase+1.0/FPS)%1.0
         if self._indicator: self._indicator.setPhase_(self._anim_phase)
-        if self._state == "recording" and self._lbl_timer:
-            e = time.time() - self._record_start
-            self._lbl_timer.setStringValue_(f"{int(e//60)}:{int(e%60):02d}")
+        if self._state=="recording" and self._lbl_timer:
+            e=time.time()-self._record_start
+            self._lbl_timer.setText_(f"{int(e//60)}:{int(e%60):02d}")
 
     # ------------------------------------------------------------------
     def show(self):
         if self._panel is None: self._setup()
-        self._transcript = ""
+        self._transcript=""
         self._updateLayout()
         self._panel.setAlphaValue_(1.0)
         self._panel.orderFrontRegardless()
@@ -349,59 +359,36 @@ class OverlayPanel(NSObject):
             self._panel.orderOut_(None)
 
     def setStateObj_(self, state):
-        self._state = state
+        self._state=state
         if self._indicator: self._indicator.setState_(state)
-        if self._waveform:  self._waveform.setActive_(state == "recording")
+        if self._waveform:  self._waveform.setActive_(state=="recording")
         if self._lbl_state:
-            self._lbl_state.setStringValue_(
-                {"recording": "Listening", "transcribing": "Transcribing"}.get(state, ""))
+            self._lbl_state.setText_(
+                {"recording":"Listening","transcribing":"Transcribing"}.get(state,""))
         if self._lbl_timer:
-            if state == "recording":
-                self._record_start = time.time()
-                self._lbl_timer.setStringValue_("0:00")
-            elif state == "idle":
-                self._lbl_timer.setStringValue_("")
-        if state == "idle":
-            self._transcript = ""
+            if state=="recording":
+                self._record_start=time.time()
+                self._lbl_timer.setText_("0:00")
+            elif state=="idle":
+                self._lbl_timer.setText_("")
+        if state=="idle":
+            self._transcript=""
             self._updateLayout()
 
     def setLevelsObj_(self, lvl):
         if self._waveform: self._waveform.setLevels_(lvl)
 
     def setTextObj_(self, text):
-        self._transcript = text or ""
+        self._transcript=text or ""
         self._updateLayout()
 
-    # ------------------------------------------------------------------
     def push_state(self, s):
-        self.performSelectorOnMainThread_withObject_waitUntilDone_("setStateObj:", s, False)
-
+        self.performSelectorOnMainThread_withObject_waitUntilDone_("setStateObj:",s,False)
     def push_levels(self, lvl):
-        self.performSelectorOnMainThread_withObject_waitUntilDone_("setLevelsObj:", list(lvl), False)
-
+        self.performSelectorOnMainThread_withObject_waitUntilDone_("setLevelsObj:",list(lvl),False)
     def push_text(self, text):
-        self.performSelectorOnMainThread_withObject_waitUntilDone_("setTextObj:", text, False)
-
+        self.performSelectorOnMainThread_withObject_waitUntilDone_("setTextObj:",text,False)
     def show_async(self):
-        self.performSelectorOnMainThread_withObject_waitUntilDone_("show", None, False)
-
+        self.performSelectorOnMainThread_withObject_waitUntilDone_("show",None,False)
     def hide_async(self):
-        self.performSelectorOnMainThread_withObject_waitUntilDone_("hide", None, False)
-
-
-# ---------------------------------------------------------------------------
-# Label helper — no borders, no background, no focus ring
-# ---------------------------------------------------------------------------
-def _lbl(x, y, w, h, text, color, size, right=False):
-    l = NSTextField.alloc().initWithFrame_(NSMakeRect(x, y, w, h))
-    l.setEditable_(False); l.setBordered_(False)
-    l.setDrawsBackground_(False)
-    l.setBackgroundColor_(NSColor.clearColor())
-    l.cell().setDrawsBackground_(False)
-    l.cell().setBackgroundColor_(NSColor.clearColor())
-    l.setFocusRingType_(NSFocusRingTypeNone)
-    l.setTextColor_(color)
-    l.setFont_(NSFont.systemFontOfSize_weight_(size, 0.3))
-    l.setAlignment_(NSTextAlignmentRight if right else NSTextAlignmentLeft)
-    l.setStringValue_(text)
-    return l
+        self.performSelectorOnMainThread_withObject_waitUntilDone_("hide",None,False)
