@@ -29,6 +29,7 @@ FILLER_RE = re.compile(
 
 SAMPLE_RATE = 16000
 HOTKEY = keyboard.Key.alt_r
+HOTKEY_ALT = keyboard.Key.alt  # catch both left and right Option
 MODELS = {
     "Tiny   (fastest)":  "mlx-community/whisper-tiny.en-mlx",
     "Base   (default)":  "mlx-community/whisper-base.en-mlx",
@@ -164,6 +165,9 @@ class WhisperLocal(rumps.App):
 
         self.menu.add(rumps.separator)
         self.menu.add(rumps.MenuItem("Check Accessibility…", callback=self._open_accessibility))
+        self._status_item = rumps.MenuItem("Listener: starting…")
+        self._status_item.set_callback(None)
+        self.menu.add(self._status_item)
         self.menu.add(rumps.separator)
         self.menu.add(rumps.MenuItem("Quit", callback=self._quit))
 
@@ -333,16 +337,21 @@ class WhisperLocal(rumps.App):
         )
         self._listener.daemon = True
         self._listener.start()
+        if hasattr(self, "_status_item"):
+            self._status_item.title = "Listener: ✅ active — hold ⌥ to dictate"
+
+    def _is_hotkey(self, key):
+        return key in (HOTKEY, HOTKEY_ALT, keyboard.Key.alt_l)
 
     def _on_press(self, key):
         # Escape or second Option tap cancels
         if key == keyboard.Key.esc:
             self._cancel()
             return
-        if key == HOTKEY and (self.recording or self._transcribing):
+        if self._is_hotkey(key) and (self.recording or self._transcribing):
             self._cancel()
             return
-        if key != HOTKEY or self.recording or self.model is None:
+        if not self._is_hotkey(key) or self.recording or self.model is None:
             return
         self._cancelled = False
         self._target_element, self._target_app = self._snapshot_focus()
@@ -364,7 +373,7 @@ class WhisperLocal(rumps.App):
         self._start_timeout()
 
     def _on_release(self, key):
-        if key != HOTKEY or not self.recording:
+        if not self._is_hotkey(key) or not self.recording:
             return
         self._stop_timeout()
         self.recording = False
