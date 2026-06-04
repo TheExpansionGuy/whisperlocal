@@ -13,6 +13,7 @@ import numpy as np
 import pyperclip
 import rumps
 import sounddevice as sd
+from AppKit import NSEvent
 from pynput import keyboard
 
 # ---------------------------------------------------------------------------
@@ -328,25 +329,39 @@ class WhisperLocal(rumps.App):
     # ------------------------------------------------------------------
 
     def _start_listener(self):
-        if hasattr(self, "_listener") and self._listener and self._listener.is_alive():
-            try:
-                self._listener.stop()
-            except Exception:
-                pass
-        self._listener = keyboard.Listener(
-            on_press=self._on_press, on_release=self._on_release
-        )
-        self._listener.daemon = True
-        self._listener.start()
+        """Use NSEvent global monitor for modifier keys (more reliable than pynput for Option)."""
+        # NSFlagsChangedMask = 1 << 12  — fires on every modifier key change
+        NSFlagsChangedMask = 1 << 12
+        NSKeyDownMask      = 1 << 10
+
+        alt_was_down = [False]
+
+        def flags_handler(event):
+            # NSAlternateKeyMask = 0x00080000
+            alt_now = bool(event.modifierFlags() & 0x00080000)
+            if alt_now and not alt_was_down[0]:
+                alt_was_down[0] = True
+                self._on_press(keyboard.Key.alt_r)
+            elif not alt_now and alt_was_down[0]:
+                alt_was_down[0] = False
+                self._on_release(keyboard.Key.alt_r)
+
+        def key_handler(event):
+            # keyCode 53 = Escape
+            if event.keyCode() == 53:
+                self._on_press(keyboard.Key.esc)
+
+        NSEvent.addGlobalMonitorForEventsMatchingMask_handler_(
+            NSFlagsChangedMask, flags_handler)
+        NSEvent.addGlobalMonitorForEventsMatchingMask_handler_(
+            NSKeyDownMask, key_handler)
+
         if hasattr(self, "_status_item"):
             ready = "hold ⌥ to dictate" if self._model_ready else "loading model…"
             self._status_item.title = f"Listener: ✅ active — {ready}"
 
-    def _is_hotkey(self, key):
-        return key in (HOTKEY, HOTKEY_ALT, keyboard.Key.alt_l)
-
     def _on_press(self, key):
-        # Escape or second Option tap cancels
+        # Called from NSEvent monitor (main thread) or pynput fallback
         if key == keyboard.Key.esc:
             self._cancel()
             return
@@ -388,6 +403,9 @@ class WhisperLocal(rumps.App):
         self._set_state("transcribing")
         self._overlay.push_state("transcribing")
         threading.Thread(target=self._transcribe_final, daemon=True).start()
+
+    def _is_hotkey(self, key):
+        return key in (HOTKEY, HOTKEY_ALT, keyboard.Key.alt_l)
 
     def _cancel(self):
         """Stop recording and hide overlay without transcribing."""
