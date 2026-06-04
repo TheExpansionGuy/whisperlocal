@@ -180,9 +180,14 @@ class _PillCanvas(NSView):
         if n < 2: return
         xs  = [rect.origin.x + i * w / (n - 1) for i in range(n)]
         amp = h / 2 * 0.84
-        # Enforce a minimum amplitude so waveform is always curved, never a flat rectangle
+        # Minimum amplitude keeps it curved; taper edges to zero for smooth fade-in/out
         min_amp = 0.08
         levels = [max(min_amp, lv) for lv in self._levels]
+        taper = 4  # number of samples to fade at each edge
+        for i in range(taper):
+            t = i / taper
+            levels[i] = levels[i] * t
+            levels[-(i+1)] = levels[-(i+1)] * t
         top = [(xs[i], cy - levels[i] * amp) for i in range(n)]
         bot = [(xs[i], cy + levels[i] * amp) for i in range(n-1, -1, -1)]
         (BLUE if self._state == "recording" else DIM).setFill()
