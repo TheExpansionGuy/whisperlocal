@@ -33,7 +33,7 @@ echo "▸ Embedding mlx packages (can't be bundled by py2app)…"
 SITE=$(python3 -c "import site; print(site.getsitepackages()[0])")
 DST="dist/WhisperLocal.app/Contents/Resources/venv/lib/site-packages"
 mkdir -p "$DST"
-for pkg in mlx mlx_whisper; do
+for pkg in mlx mlx_whisper tiktoken; do
   if [ -d "$SITE/$pkg" ]; then
     cp -r "$SITE/$pkg" "$DST/"
     echo "  copied $pkg"
