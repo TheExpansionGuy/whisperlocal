@@ -213,34 +213,55 @@ class _PillCanvas(NSView):
                    _vcenter_rect(TMR_X, TMR_W, 16, 0, PILL_H))
 
     def _draw_transcript(self, total_h):
-        """Draw words with per-word alpha fade-in."""
+        """Draw words top-to-bottom with per-word alpha fade-in."""
         if not self._word_alphas:
             return
-        x = TX_PAD_H
-        y = PILL_H + TX_PAD_V
-        line_h = LINE_H
-        max_w = PANEL_W - TX_PAD_H * 2
-        line_x = x
 
-        # Measure each word and lay out
-        space_w = 4.0
+        max_w = PANEL_W - TX_PAD_H * 2
+
+        # First pass: lay out words into lines
+        lines = []      # list of [(word, alpha), ...]
+        current_line = []
+        current_w = 0.0
+
         for word, alpha in self._word_alphas:
-            if alpha <= 0: continue
             attrs = {
                 NSFontAttributeName: _FONT_TX,
-                NSForegroundColorAttributeName: NSColor.colorWithRed_green_blue_alpha_(
-                    0.92, 0.92, 0.94, alpha),
+                NSForegroundColorAttributeName: WHITE,
                 NSParagraphStyleAttributeName: _para(NSTextAlignmentLeft),
             }
             s = NSString.stringWithString_(word + " ")
             sz = s.sizeWithAttributes_(attrs)
-            if line_x + sz.width > x + max_w and line_x > x:
-                line_x = x
-                y += line_h
-            if y + line_h > total_h - TX_PAD_V:
-                break
-            s.drawAtPoint_withAttributes_(NSMakePoint(line_x, y), attrs)
-            line_x += sz.width
+            if current_w + sz.width > max_w and current_line:
+                lines.append(current_line)
+                current_line = [(word, alpha, sz.width)]
+                current_w = sz.width
+            else:
+                current_line.append((word, alpha, sz.width))
+                current_w += sz.width
+        if current_line:
+            lines.append(current_line)
+
+        # Cap at MAX_LINES, showing the most recent lines
+        lines = lines[-MAX_LINES:]
+
+        # Second pass: draw top-to-bottom
+        # In AppKit y-up coords: top of transcript = total_h - TX_PAD_V
+        # Each line goes down by LINE_H
+        y = total_h - TX_PAD_V - LINE_H
+        for line in lines:
+            x = TX_PAD_H
+            for word, alpha, w in line:
+                attrs = {
+                    NSFontAttributeName: _FONT_TX,
+                    NSForegroundColorAttributeName: NSColor.colorWithRed_green_blue_alpha_(
+                        0.92, 0.92, 0.94, alpha),
+                    NSParagraphStyleAttributeName: _para(NSTextAlignmentLeft),
+                }
+                s = NSString.stringWithString_(word + " ")
+                s.drawAtPoint_withAttributes_(NSMakePoint(x, y), attrs)
+                x += w
+            y -= LINE_H
 
     def _draw_indicator(self, cx, cy):
         m = self._morph  # 0=dot, 1=three dots

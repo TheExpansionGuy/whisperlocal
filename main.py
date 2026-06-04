@@ -270,14 +270,10 @@ class WhisperLocal(rumps.App):
         self.icon = icons.get(state, ICON_IDLE)
 
     def _venv_python(self) -> str:
-        """Path to venv Python — reads from bundle or falls back to current interpreter."""
         if getattr(sys, "frozen", False):
             txt = Path(sys.executable).parent.parent / "Resources" / "venv_python.txt"
-        else:
-            txt = Path(__file__).parent / "build.sh"  # dev: use current venv
-            return sys.executable
-        if txt.exists():
-            return txt.read_text().strip()
+            if txt.exists():
+                return txt.read_text().strip()
         return sys.executable
 
     def _worker_script(self) -> str:
@@ -285,46 +281,52 @@ class WhisperLocal(rumps.App):
             return str(Path(sys.executable).parent.parent / "Resources" / "transcribe_worker.py")
         return str(Path(__file__).parent / "transcribe_worker.py")
 
+    def _worker_env(self) -> dict:
+        venv_python = self._venv_python()
+        return {
+            "HOME":   str(Path.home()),
+            "USER":   os.environ.get("USER", ""),
+            "TMPDIR": os.environ.get("TMPDIR", "/tmp"),
+            "PATH":   f"{Path(venv_python).parent}:/usr/bin:/bin:/usr/local/bin",
+            "LANG":   "en_US.UTF-8",
+        }
+
     def _load_model(self):
-        """Pre-warm by running a silent transcription via subprocess."""
+        """Start persistent worker — stays alive between transcriptions."""
         self._set_state("transcribing")
-        silence = np.zeros(SAMPLE_RATE, dtype=np.float32)
-        self._run_transcription(silence)  # warm-up
-        self._model_ready = True
-        model_short = self.cfg["model"].split("/")[-1]
-        if hasattr(self, "_status_item"):
-            self._status_item.title = f"MLX ✅  {model_short} — hold ⌥"
+        try:
+            self._worker = subprocess.Popen(
+                [self._venv_python(), self._worker_script(), self.cfg["model"], "en"],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                env=self._worker_env(),
+            )
+            line = self._worker.stdout.readline().strip()
+            if line == b"READY":
+                self._model_ready = True
+                model_short = self.cfg["model"].split("/")[-1]
+                if hasattr(self, "_status_item"):
+                    self._status_item.title = f"MLX ✅  {model_short} — hold ⌥"
+            else:
+                raise RuntimeError(f"Unexpected worker output: {line}")
+        except Exception as e:
+            print(f"Worker start error: {e}")
+            if hasattr(self, "_status_item"):
+                self._status_item.title = f"MLX ❌ {str(e)[:60]}"
         self._set_state("idle")
 
     def _run_transcription(self, audio: np.ndarray) -> str:
-        """Run MLX Whisper in a subprocess using the venv Python."""
-        import json, os
-        venv_python = self._venv_python()
-
-        # Use a minimal clean env — app bundle injects DYLD vars that break mlx
-        env = {
-            "HOME":    str(Path.home()),
-            "USER":    os.environ.get("USER", ""),
-            "TMPDIR":  os.environ.get("TMPDIR", "/tmp"),
-            "PATH":    f"{Path(venv_python).parent}:/usr/bin:/bin:/usr/local/bin",
-            "LANG":    "en_US.UTF-8",
-        }
-
+        """Send audio to persistent worker, return text. No subprocess startup cost."""
+        if not hasattr(self, "_worker") or self._worker.poll() is not None:
+            return ""
         try:
-            result = subprocess.run(
-                [venv_python, self._worker_script(), self.cfg["model"], "en"],
-                input=audio.tobytes(),
-                capture_output=True,
-                timeout=60,
-                env=env,
-            )
-            if result.returncode == 0:
-                return json.loads(result.stdout.strip())
-            else:
-                err = result.stderr.decode()[:200]
-                print(f"Worker error: {err}")
-                self._status_item.title = f"MLX ❌ {err[:60]}"
-                return ""
+            data = audio.tobytes()
+            self._worker.stdin.write(f"{len(data)}\n".encode())
+            self._worker.stdin.write(data)
+            self._worker.stdin.flush()
+            line = self._worker.stdout.readline()
+            return json.loads(line.strip())
         except Exception as e:
             print(f"Transcription error: {e}")
             return ""
