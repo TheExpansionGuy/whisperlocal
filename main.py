@@ -325,11 +325,10 @@ class WhisperLocal(rumps.App):
             return ""
         try:
             data = audio.tobytes()
-            self._worker.stdin.write(f"{len(data)}\n".encode())
-            self._worker.stdin.write(data)
+            self._worker.stdin.write(f"{len(data)}\n".encode() + data)
             self._worker.stdin.flush()
             line = self._worker.stdout.readline()
-            return json.loads(line.strip())
+            return json.loads(line.strip()) if line.strip() else ""
         except Exception as e:
             print(f"Transcription error: {e}")
             return ""

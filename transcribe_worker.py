@@ -35,14 +35,15 @@ def main():
         sys.stdout = _real_stdout
         sys.stderr = _real_stderr
 
-    print("READY", flush=True)
+    sys.stdout.write("READY\n")
+    sys.stdout.flush()
 
     while True:
-        header = sys.stdin.readline().strip()
-        if not header or header == "QUIT":
+        header = sys.stdin.buffer.readline().strip()
+        if not header or header == b"QUIT":
             break
         try:
-            n_bytes = int(header)
+            n_bytes = int(header.decode())
             data    = sys.stdin.buffer.read(n_bytes)
             audio   = np.frombuffer(data, dtype=np.float32)
             result  = mlx_whisper.transcribe(
