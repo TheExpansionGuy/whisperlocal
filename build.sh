@@ -10,7 +10,21 @@ echo "▸ Generating icon…"
 python icon.py
 
 echo "▸ Building app bundle…"
-python setup.py py2app 2>&1 | grep -v "^zip\|^byte\|^copying\|^stripping\|^creating"
+# Run py2app with a higher recursion limit to handle complex dependency graphs
+python3 -c "
+import sys
+sys.setrecursionlimit(10000)
+import runpy
+sys.argv = ['setup.py', 'py2app']
+runpy.run_path('setup.py', run_name='__main__')
+" 2>&1 | grep -v "^zip\|^byte\|^copying\|^stripping\|^creating\|RecursionError\|return visitor\|self.visit\|File.*site-packages"
+
+# Verify binary was created
+if [ ! -f "dist/WhisperLocal.app/Contents/MacOS/WhisperLocal" ]; then
+  echo "❌ Build failed — binary not created"
+  exit 1
+fi
+echo "  binary OK"
 
 echo "▸ Ensuring PortAudio dylib is not zipped…"
 python3 - <<'EOF'
@@ -29,24 +43,15 @@ if zip_path:
         print(f"  extracted {len(targets)} sounddevice entries")
 EOF
 
-echo "▸ Embedding mlx packages (can't be bundled by py2app)…"
-SITE=$(python3 -c "import site; print(site.getsitepackages()[0])")
-DST="dist/WhisperLocal.app/Contents/Resources/venv/lib/site-packages"
-mkdir -p "$DST"
-for pkg in mlx mlx_whisper tiktoken; do
-  if [ -d "$SITE/$pkg" ]; then
-    cp -r "$SITE/$pkg" "$DST/"
-    echo "  copied $pkg"
-  fi
-done
-# Also copy any mlx .dist-info for version metadata
-for d in "$SITE"/mlx*.dist-info "$SITE"/mlx_whisper*.dist-info; do
-  [ -d "$d" ] && cp -r "$d" "$DST/"
-done
-echo "  embedded ($(du -sh $DST | cut -f1))"
+echo "▸ Bundling transcription worker + venv reference…"
+RES="dist/WhisperLocal.app/Contents/Resources"
+cp transcribe_worker.py "$RES/transcribe_worker.py"
+python3 -c "import sys; print(sys.executable)" > "$RES/venv_python.txt"
+echo "  venv: $(cat $RES/venv_python.txt)"
+
+echo "▸ Installing to /Applications (clean replace)…"
+rm -rf /Applications/WhisperLocal.app
+cp -r dist/WhisperLocal.app /Applications/
 
 echo ""
-echo "✓ Built: dist/WhisperLocal.app"
-echo ""
-echo "To install:"
-echo "  cp -r dist/WhisperLocal.app /Applications/"
+echo "✓ Built and installed: /Applications/WhisperLocal.app"

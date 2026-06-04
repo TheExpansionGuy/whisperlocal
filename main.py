@@ -8,13 +8,7 @@ import threading
 import time
 from pathlib import Path
 
-# When running as a bundled app, mlx-whisper lives in the embedded venv
-if getattr(sys, "frozen", False):
-    _venv_packages = Path(sys.executable).parent.parent / "Resources" / "venv" / "lib" / "site-packages"
-    if _venv_packages.exists() and str(_venv_packages) not in sys.path:
-        sys.path.insert(0, str(_venv_packages))
-
-import mlx_whisper
+# MLX transcription runs in a subprocess via the venv Python (avoids bundling issues)
 import numpy as np
 import pyperclip
 import rumps
@@ -270,32 +264,59 @@ class WhisperLocal(rumps.App):
         icons = {"idle": ICON_IDLE, "recording": ICON_RECORDING, "transcribing": ICON_TRANSCRIBING}
         self.icon = icons.get(state, ICON_IDLE)
 
+    def _venv_python(self) -> str:
+        """Path to venv Python — reads from bundle or falls back to current interpreter."""
+        if getattr(sys, "frozen", False):
+            txt = Path(sys.executable).parent.parent / "Resources" / "venv_python.txt"
+        else:
+            txt = Path(__file__).parent / "build.sh"  # dev: use current venv
+            return sys.executable
+        if txt.exists():
+            return txt.read_text().strip()
+        return sys.executable
+
+    def _worker_script(self) -> str:
+        if getattr(sys, "frozen", False):
+            return str(Path(sys.executable).parent.parent / "Resources" / "transcribe_worker.py")
+        return str(Path(__file__).parent / "transcribe_worker.py")
+
     def _load_model(self):
-        """Pre-warm the MLX model by running a silent pass through it."""
+        """Pre-warm by running a silent transcription via subprocess."""
         self._set_state("transcribing")
-        with self._model_lock:
-            try:
-                silence = np.zeros(SAMPLE_RATE, dtype=np.float32)
-                mlx_whisper.transcribe(
-                    silence,
-                    path_or_hf_repo=self.cfg["model"],
-                    language="en",
-                    verbose=False,
-                )
-                self._current_model = self.cfg["model"]
-            except Exception as e:
-                print(f"Model warm-up error: {e}")
+        silence = np.zeros(SAMPLE_RATE, dtype=np.float32)
+        self._run_transcription(silence)  # warm-up
         self._set_state("idle")
 
     def _run_transcription(self, audio: np.ndarray) -> str:
-        """Run MLX Whisper on audio, return text."""
-        result = mlx_whisper.transcribe(
-            audio,
-            path_or_hf_repo=self.cfg["model"],
-            language="en",
-            verbose=False,
-        )
-        return result.get("text", "").strip()
+        """Run MLX Whisper in a subprocess using the venv Python."""
+        import json, os
+        venv_python = self._venv_python()
+        venv_dir = str(Path(venv_python).parent.parent)
+
+        # Build a clean env with venv paths so native extensions load correctly
+        env = os.environ.copy()
+        env["VIRTUAL_ENV"] = venv_dir
+        env["PATH"] = str(Path(venv_python).parent) + ":" + env.get("PATH", "")
+        # Remove app bundle's stripped DYLD paths so system libs are found
+        env.pop("DYLD_LIBRARY_PATH", None)
+        env.pop("DYLD_FRAMEWORK_PATH", None)
+
+        try:
+            result = subprocess.run(
+                [venv_python, self._worker_script(), self.cfg["model"], "en"],
+                input=audio.tobytes(),
+                capture_output=True,
+                timeout=60,
+                env=env,
+            )
+            if result.returncode == 0:
+                return json.loads(result.stdout.strip())
+            else:
+                print(f"Worker error: {result.stderr.decode()[:400]}")
+                return ""
+        except Exception as e:
+            print(f"Transcription error: {e}")
+            return ""
 
     # ------------------------------------------------------------------
     # Hotkey listener
