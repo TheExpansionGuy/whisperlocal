@@ -4,8 +4,9 @@ APP="/Applications/WhisperLocal.app"
 RES="$APP/Contents/Resources"
 ZIP=$(ls "$RES/lib/python"*.zip)
 
-echo "▸ Updating main.py..."
+echo "▸ Updating Python sources..."
 cp main.py "$RES/main.py"
+cp transcribe_worker.py "$RES/transcribe_worker.py"
 
 echo "▸ Compiling and injecting overlay.py into bundle zip..."
 python3 - "$ZIP" <<'EOF'
