@@ -1,4 +1,4 @@
-faster-whisper
+mlx-whisper
 sounddevice
 numpy
 pyperclip

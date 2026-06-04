@@ -29,22 +29,20 @@ OPTIONS = {
             "WhisperLocal uses System Events to paste transcribed text into the active app."
         ),
     },
+    # mlx can't be bundled by py2app — we embed the venv instead (see build.sh)
     "packages": [
-        "faster_whisper",
         "sounddevice",
         "_sounddevice_data",
         "numpy",
         "rumps",
         "pynput",
         "pyperclip",
-        "ctranslate2",
-        "tokenizers",
         "huggingface_hub",
         "ApplicationServices",
         "AppKit",
         "Foundation",
     ],
-    "excludes": ["tkinter", "matplotlib", "scipy", "PIL"],
+    "excludes": ["tkinter", "matplotlib", "scipy", "PIL", "mlx", "mlx_whisper"],
     "strip": False,
 }
 

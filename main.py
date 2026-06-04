@@ -8,11 +8,17 @@ import threading
 import time
 from pathlib import Path
 
+# When running as a bundled app, mlx-whisper lives in the embedded venv
+if getattr(sys, "frozen", False):
+    _venv_packages = Path(sys.executable).parent.parent / "Resources" / "venv" / "lib" / "site-packages"
+    if _venv_packages.exists() and str(_venv_packages) not in sys.path:
+        sys.path.insert(0, str(_venv_packages))
+
+import mlx_whisper
 import numpy as np
 import pyperclip
 import rumps
 import sounddevice as sd
-from faster_whisper import WhisperModel
 from pynput import keyboard
 
 # ---------------------------------------------------------------------------
@@ -20,7 +26,7 @@ from pynput import keyboard
 # ---------------------------------------------------------------------------
 
 CONFIG_PATH = Path.home() / ".whisperlocal" / "config.json"
-DEFAULTS = {"model": "base.en", "filler_removal": True, "history": []}
+DEFAULTS = {"model": "mlx-community/whisper-base.en-mlx", "filler_removal": True, "history": []}
 HISTORY_MAX = 10
 
 FILLER_RE = re.compile(
@@ -29,7 +35,12 @@ FILLER_RE = re.compile(
 
 SAMPLE_RATE = 16000
 HOTKEY = keyboard.Key.alt_r
-MODELS = ["tiny.en", "base.en", "small.en", "medium.en"]
+MODELS = {
+    "Tiny   (fastest)":  "mlx-community/whisper-tiny.en-mlx",
+    "Base   (default)":  "mlx-community/whisper-base.en-mlx",
+    "Small  (better)":   "mlx-community/whisper-small.en-mlx",
+    "Medium (best)":     "mlx-community/whisper-medium.en-mlx",
+}
 
 # Locate assets relative to this file (works both in dev and py2app bundle)
 if getattr(sys, "frozen", False):
@@ -83,8 +94,9 @@ class WhisperLocal(rumps.App):
         self._timeout_timer = None
         self._cancelled = False
         self._transcribing = False
-        self._target_element = None   # AX element focused when hotkey was pressed
-        self._target_app = None       # NSRunningApplication at that moment
+        self._target_element = None
+        self._target_app = None
+        self._current_model = None   # currently loaded model repo
 
         # Overlay (AppKit panel — created lazily on main thread)
         from overlay import OverlayPanel
@@ -142,9 +154,9 @@ class WhisperLocal(rumps.App):
         self.menu.add(rumps.separator)
 
         model_item = rumps.MenuItem("Model")
-        for m in MODELS:
-            item = rumps.MenuItem(m, callback=self._set_model)
-            item.state = int(m == self.cfg["model"])
+        for label, repo in MODELS.items():
+            item = rumps.MenuItem(label, callback=self._set_model)
+            item.state = int(repo == self.cfg["model"])
             model_item.add(item)
         self.menu.add(model_item)
 
@@ -185,11 +197,12 @@ class WhisperLocal(rumps.App):
     # ------------------------------------------------------------------
 
     def _set_model(self, sender):
-        if sender.title == self.cfg["model"]:
+        new_model = MODELS[sender.title]
+        if new_model == self.cfg["model"]:
             return
         for item in self.menu["Model"].values():
             item.state = int(item.title == sender.title)
-        self.cfg["model"] = sender.title
+        self.cfg["model"] = new_model
         save_config(self.cfg)
         threading.Thread(target=self._load_model, daemon=True).start()
 
@@ -258,12 +271,31 @@ class WhisperLocal(rumps.App):
         self.icon = icons.get(state, ICON_IDLE)
 
     def _load_model(self):
+        """Pre-warm the MLX model by running a silent pass through it."""
         self._set_state("transcribing")
         with self._model_lock:
-            self.model = WhisperModel(
-                self.cfg["model"], device="cpu", compute_type="int8"
-            )
+            try:
+                silence = np.zeros(SAMPLE_RATE, dtype=np.float32)
+                mlx_whisper.transcribe(
+                    silence,
+                    path_or_hf_repo=self.cfg["model"],
+                    language="en",
+                    verbose=False,
+                )
+                self._current_model = self.cfg["model"]
+            except Exception as e:
+                print(f"Model warm-up error: {e}")
         self._set_state("idle")
+
+    def _run_transcription(self, audio: np.ndarray) -> str:
+        """Run MLX Whisper on audio, return text."""
+        result = mlx_whisper.transcribe(
+            audio,
+            path_or_hf_repo=self.cfg["model"],
+            language="en",
+            verbose=False,
+        )
+        return result.get("text", "").strip()
 
     # ------------------------------------------------------------------
     # Hotkey listener
@@ -396,10 +428,7 @@ class WhisperLocal(rumps.App):
             if len(audio) < SAMPLE_RATE * 0.5:
                 return
             with self._model_lock:
-                segs, _ = self.model.transcribe(
-                    audio, language="en", vad_filter=True
-                )
-                text = " ".join(s.text for s in segs).strip()
+                text = self._run_transcription(audio)
             if text:
                 self._overlay.push_text(text)
         except Exception:
@@ -417,10 +446,7 @@ class WhisperLocal(rumps.App):
             if len(audio) < SAMPLE_RATE * 0.3:
                 return
             with self._model_lock:
-                segments, _ = self.model.transcribe(
-                    audio, language="en", vad_filter=True
-                )
-                text = " ".join(s.text for s in segments).strip()
+                text = self._run_transcription(audio)
             if self.cfg["filler_removal"]:
                 text = FILLER_RE.sub("", text).strip()
             if not text:
