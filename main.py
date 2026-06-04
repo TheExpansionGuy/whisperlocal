@@ -291,6 +291,9 @@ class WhisperLocal(rumps.App):
         silence = np.zeros(SAMPLE_RATE, dtype=np.float32)
         self._run_transcription(silence)  # warm-up
         self._model_ready = True
+        model_short = self.cfg["model"].split("/")[-1]
+        if hasattr(self, "_status_item"):
+            self._status_item.title = f"MLX ✅  {model_short} — hold ⌥"
         self._set_state("idle")
 
     def _run_transcription(self, audio: np.ndarray) -> str:
@@ -318,7 +321,9 @@ class WhisperLocal(rumps.App):
             if result.returncode == 0:
                 return json.loads(result.stdout.strip())
             else:
-                print(f"Worker error: {result.stderr.decode()[:400]}")
+                err = result.stderr.decode()[:200]
+                print(f"Worker error: {err}")
+                self._status_item.title = f"MLX ❌ {err[:60]}"
                 return ""
         except Exception as e:
             print(f"Transcription error: {e}")
