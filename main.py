@@ -91,7 +91,7 @@ class WhisperLocal(rumps.App):
         self._transcribing = False
         self._target_element = None
         self._target_app = None
-        self._current_model = None   # currently loaded model repo
+        self._model_ready = False    # True once warm-up completes
 
         # Overlay (AppKit panel — created lazily on main thread)
         from overlay import OverlayPanel
@@ -289,6 +289,7 @@ class WhisperLocal(rumps.App):
         self._set_state("transcribing")
         silence = np.zeros(SAMPLE_RATE, dtype=np.float32)
         self._run_transcription(silence)  # warm-up
+        self._model_ready = True
         self._set_state("idle")
 
     def _run_transcription(self, audio: np.ndarray) -> str:
@@ -338,7 +339,8 @@ class WhisperLocal(rumps.App):
         self._listener.daemon = True
         self._listener.start()
         if hasattr(self, "_status_item"):
-            self._status_item.title = "Listener: ✅ active — hold ⌥ to dictate"
+            ready = "hold ⌥ to dictate" if self._model_ready else "loading model…"
+            self._status_item.title = f"Listener: ✅ active — {ready}"
 
     def _is_hotkey(self, key):
         return key in (HOTKEY, HOTKEY_ALT, keyboard.Key.alt_l)
@@ -351,7 +353,7 @@ class WhisperLocal(rumps.App):
         if self._is_hotkey(key) and (self.recording or self._transcribing):
             self._cancel()
             return
-        if not self._is_hotkey(key) or self.recording or self.model is None:
+        if not self._is_hotkey(key) or self.recording or not self._model_ready:
             return
         self._cancelled = False
         self._target_element, self._target_app = self._snapshot_focus()
