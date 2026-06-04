@@ -1,4 +1,4 @@
-"""Pill overlay — single NSView draws everything. No subviews, no bezels possible."""
+"""WhisperLocal overlay — animated pill with word-by-word transcript, state morph, spring resize."""
 import math
 import time
 import objc
@@ -9,18 +9,19 @@ from AppKit import (
     NSParagraphStyleAttributeName, NSMutableParagraphStyle,
     NSTextAlignmentCenter, NSTextAlignmentLeft, NSTextAlignmentRight,
     NSLineBreakByTruncatingTail, NSLineBreakByWordWrapping,
+    NSAnimationContext,
 )
 from Foundation import NSMakePoint, NSObject, NSTimer, NSString
 
 # ---------------------------------------------------------------------------
-# Layout & colours
+# Layout
 # ---------------------------------------------------------------------------
 PANEL_W    = 600
 PILL_H     = 52
 MAX_LINES  = 6
 LINE_H     = 20
-TX_PAD_V   = 10
-TX_PAD_H   = 22
+TX_PAD_V   = 12
+TX_PAD_H   = 24
 BOTTOM     = 64
 CORNER     = 26.0
 FPS        = 30
@@ -32,15 +33,14 @@ _STYLE   = NSBorderlessWindowMask | NSNonactivatingPanelMask
 def _c(r, g, b, a=1.0):
     return NSColor.colorWithRed_green_blue_alpha_(r, g, b, a)
 
-BG      = _c(0.11, 0.11, 0.12, 0.97)
+BG      = _c(0.09, 0.09, 0.11, 0.96)
 RED     = _c(1.00, 0.27, 0.23, 1.0)
-BLUE    = _c(0.42, 0.78, 1.00, 0.82)
-WHITE   = _c(0.90, 0.90, 0.92, 1.0)
-DIM     = _c(0.50, 0.50, 0.52, 1.0)
+BLUE    = _c(0.42, 0.78, 1.00, 0.85)
+WHITE   = _c(0.92, 0.92, 0.94, 1.0)
+DIM     = _c(0.48, 0.48, 0.52, 1.0)
 DIVIDER = _c(1.00, 1.00, 1.00, 0.07)
-RING    = _c(1.00, 1.00, 1.00, 0.09)
+RING    = _c(1.00, 1.00, 1.00, 0.10)
 
-# Pill-strip sub-positions
 PAD   = 18
 IND_W = 22;  IND_X = PAD
 TMR_W = 46;  TMR_X = PANEL_W - PAD - TMR_W
@@ -48,9 +48,14 @@ LBL_W = 84;  LBL_X = TMR_X - LBL_W - 6
 WAV_X = IND_X + IND_W + 12
 WAV_W = LBL_X - WAV_X - 8
 
+# Animation constants
+MORPH_SPEED   = 2.5   # units/sec for state morph (0→1)
+WORD_FADE_SPD = 5.0   # alpha/sec for word fade-in
+RING_SPEED    = 1.2   # ripple ring expansion speed
+
 
 # ---------------------------------------------------------------------------
-# Fonts & paragraph styles (built once)
+# Paragraph styles
 # ---------------------------------------------------------------------------
 def _para(align, wrap=False):
     s = NSMutableParagraphStyle.alloc().init()
@@ -60,14 +65,12 @@ def _para(align, wrap=False):
 
 _FONT_SM  = NSFont.systemFontOfSize_weight_(12.0, 0.2)
 _FONT_MED = NSFont.systemFontOfSize_weight_(12.5, 0.2)
-_FONT_TX  = NSFont.systemFontOfSize_weight_(13.0, 0.2)
+_FONT_TX  = NSFont.systemFontOfSize_weight_(13.5, 0.3)
 
 _ATTRS_STATE = {NSFontAttributeName: _FONT_MED, NSForegroundColorAttributeName: WHITE,
                 NSParagraphStyleAttributeName: _para(NSTextAlignmentLeft)}
 _ATTRS_TIMER = {NSFontAttributeName: _FONT_SM,  NSForegroundColorAttributeName: DIM,
                 NSParagraphStyleAttributeName: _para(NSTextAlignmentRight)}
-_ATTRS_TX    = {NSFontAttributeName: _FONT_TX,  NSForegroundColorAttributeName: WHITE,
-                NSParagraphStyleAttributeName: _para(NSTextAlignmentCenter, wrap=True)}
 
 
 def _draw_text(text, attrs, rect):
@@ -75,122 +78,254 @@ def _draw_text(text, attrs, rect):
         NSString.stringWithString_(text).drawInRect_withAttributes_(rect, attrs)
 
 
-def _vcenter_rect(x, w, label_h, strip_y, strip_h):
-    """Return a rect vertically centred within the strip (AppKit y-up)."""
-    return NSMakeRect(x, strip_y + (strip_h - label_h) / 2, w, label_h)
+def _vcenter_rect(x, w, h, strip_y, strip_h):
+    return NSMakeRect(x, strip_y + (strip_h - h) / 2, w, h)
 
 
 # ---------------------------------------------------------------------------
-# Single-view that draws the entire overlay
+# Canvas — single view draws everything
 # ---------------------------------------------------------------------------
 class _PillCanvas(NSView):
 
     def initWithFrame_(self, frame):
         self = objc.super(_PillCanvas, self).initWithFrame_(frame)
         if self is None: return None
-        self._state   = "idle"
-        self._phase   = 0.0
-        self._levels  = [0.02] * 52
-        self._text    = ""
-        self._timer   = ""
+        # Core state
+        self._state        = "idle"
+        self._phase        = 0.0       # animation clock (0-1 cycling)
+        self._levels       = [0.02] * 52
+        self._timer_str    = ""
+
+        # State morph: 0 = full red dot, 1 = full three dots
+        self._morph        = 0.0
+        self._morph_target = 0.0
+
+        # Ripple rings: list of (start_time, max_radius, color)
+        self._rings        = []
+
+        # Word-by-word transcript: list of (word, alpha)
+        self._word_alphas  = []        # [(word_str, alpha_float), ...]
+        self._last_words   = []        # words already fully revealed
+
         return self
 
     def isOpaque(self): return False
 
-    # -- setters called by OverlayPanel ---------------------------------
-    def setState_(self, s):   self._state=s;  self.setNeedsDisplay_(True)
-    def setPhase_(self, p):   self._phase=p;  self.setNeedsDisplay_(True)
-    def setLevels_(self, lv): self._levels=list(lv); self.setNeedsDisplay_(True)
-    def setText_(self, t):    self._text=t or "";    self.setNeedsDisplay_(True)
-    def setTimer_(self, t):   self._timer=t or "";   self.setNeedsDisplay_(True)
+    # -- setters -----------------------------------------------------------
 
-    # -------------------------------------------------------------------
+    def setState_(self, s):
+        prev = self._state
+        self._state = s
+        # Trigger morph
+        if s == "transcribing":
+            self._morph_target = 1.0
+            self._rings = []   # clear rings
+        elif s == "recording":
+            self._morph_target = 0.0
+            # Spawn a ripple ring on recording start
+            self._rings = [(time.time(), 28.0, RED)]
+        elif s == "idle":
+            self._morph_target = 0.0
+            self._morph = 0.0
+        self.setNeedsDisplay_(True)
+
+    def setPhase_(self, p):
+        dt = 1.0 / FPS
+        self._phase = p
+
+        # Advance morph
+        diff = self._morph_target - self._morph
+        if abs(diff) > 0.01:
+            self._morph += math.copysign(min(abs(diff), MORPH_SPEED * dt), diff)
+            self._morph = max(0.0, min(1.0, self._morph))
+
+        # Advance word alphas
+        for i, (w, a) in enumerate(self._word_alphas):
+            if a < 1.0:
+                self._word_alphas[i] = (w, min(1.0, a + WORD_FADE_SPD * dt))
+
+        self.setNeedsDisplay_(True)
+
+    def setLevels_(self, lv):
+        self._levels = list(lv)
+        self.setNeedsDisplay_(True)
+
+    def setTimer_(self, t):
+        self._timer_str = t or ""
+        self.setNeedsDisplay_(True)
+
+    def setWords_(self, new_words):
+        """Diff against existing words; fade in only the new ones."""
+        old = [w for w, _ in self._word_alphas]
+        # Find common prefix
+        common = 0
+        for i, (ow, nw) in enumerate(zip(old, new_words)):
+            if ow == nw: common = i + 1
+            else: break
+
+        # Keep already-revealed words, add new ones at alpha=0
+        kept = self._word_alphas[:common]
+        for w in new_words[common:]:
+            kept.append((w, 0.0))
+        self._word_alphas = kept
+        self.setNeedsDisplay_(True)
+
+    def clearWords_(self, _=None):
+        self._word_alphas = []
+        self.setNeedsDisplay_(True)
+
+    # -- drawing -----------------------------------------------------------
+
     def drawRect_(self, rect):
         total_h = rect.size.height
 
-        # Clip everything to the pill — addClip() intersects with AppKit's
-        # existing dirty-rect clip; no save/restore needed, state resets after drawRect_
         pill = NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
             rect, CORNER, CORNER)
         pill.addClip()
 
-        # Background + border drawn as one filled pill + inset stroke
+        # Background
         BG.setFill(); pill.fill()
-        inset = NSMakeRect(0.5, 0.5, rect.size.width - 1, rect.size.height - 1)
-        NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
-            inset, CORNER - 0.5, CORNER - 0.5
-        ).setLineWidth_(1.0)
-        border_path = NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
-            inset, CORNER - 0.5, CORNER - 0.5)
-        border_path.setLineWidth_(1.0); RING.setStroke(); border_path.stroke()
 
-        # Divider
-        if total_h > PILL_H + 2:
+        # Border ring
+        inset = NSMakeRect(0.5, 0.5, rect.size.width - 1, rect.size.height - 1)
+        border = NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
+            inset, CORNER - 0.5, CORNER - 0.5)
+        border.setLineWidth_(1.0); RING.setStroke(); border.stroke()
+
+        # Divider + transcript
+        if total_h > PILL_H + 4:
             div = NSBezierPath.bezierPath()
             div.moveToPoint_(NSMakePoint(PAD, PILL_H))
             div.lineToPoint_(NSMakePoint(rect.size.width - PAD, PILL_H))
             div.setLineWidth_(0.5); DIVIDER.setStroke(); div.stroke()
+            self._draw_transcript(total_h)
 
-        # Transcript text
-        if self._text and total_h > PILL_H + 2:
-            _draw_text(self._text, _ATTRS_TX,
-                       NSMakeRect(TX_PAD_H, PILL_H + TX_PAD_V,
-                                  PANEL_W - TX_PAD_H * 2,
-                                  total_h - PILL_H - TX_PAD_V * 2))
-
-        # Indicator
+        # Pill strip
         self._draw_indicator(IND_X + IND_W / 2, PILL_H / 2)
-
-        # Waveform
         self._draw_waveform(NSMakeRect(WAV_X, (PILL_H - 30) / 2, WAV_W, 30))
 
-        # State label + timer
-        _draw_text(
-            {"recording": "Listening", "transcribing": "Transcribing"}.get(self._state, ""),
-            _ATTRS_STATE, _vcenter_rect(LBL_X, LBL_W, 16, 0, PILL_H))
-        _draw_text(self._timer, _ATTRS_TIMER,
+        # Labels
+        state_label = {"recording": "Listening",
+                       "transcribing": "Transcribing"}.get(self._state, "")
+        _draw_text(state_label, _ATTRS_STATE,
+                   _vcenter_rect(LBL_X, LBL_W, 16, 0, PILL_H))
+        _draw_text(self._timer_str, _ATTRS_TIMER,
                    _vcenter_rect(TMR_X, TMR_W, 16, 0, PILL_H))
 
+    def _draw_transcript(self, total_h):
+        """Draw words with per-word alpha fade-in."""
+        if not self._word_alphas:
+            return
+        x = TX_PAD_H
+        y = PILL_H + TX_PAD_V
+        line_h = LINE_H
+        max_w = PANEL_W - TX_PAD_H * 2
+        line_x = x
+
+        # Measure each word and lay out
+        space_w = 4.0
+        for word, alpha in self._word_alphas:
+            if alpha <= 0: continue
+            attrs = {
+                NSFontAttributeName: _FONT_TX,
+                NSForegroundColorAttributeName: NSColor.colorWithRed_green_blue_alpha_(
+                    0.92, 0.92, 0.94, alpha),
+                NSParagraphStyleAttributeName: _para(NSTextAlignmentLeft),
+            }
+            s = NSString.stringWithString_(word + " ")
+            sz = s.sizeWithAttributes_(attrs)
+            if line_x + sz.width > x + max_w and line_x > x:
+                line_x = x
+                y += line_h
+            if y + line_h > total_h - TX_PAD_V:
+                break
+            s.drawAtPoint_withAttributes_(NSMakePoint(line_x, y), attrs)
+            line_x += sz.width
+
     def _draw_indicator(self, cx, cy):
-        if self._state == "recording":
+        m = self._morph  # 0=dot, 1=three dots
+
+        if m < 0.01:
+            # Pure red dot with ripple rings
+            now = time.time()
+            for t0, max_r, color in self._rings:
+                elapsed = (now - t0) * RING_SPEED
+                if elapsed < 1.0:
+                    r = max_r * elapsed
+                    a = (1.0 - elapsed) * 0.3
+                    _c(color.redComponent(), color.greenComponent(),
+                       color.blueComponent(), a).setFill()
+                    NSBezierPath.bezierPathWithOvalInRect_(
+                        NSMakeRect(cx-r, cy-r, r*2, r*2)).fill()
+            # Pulse
             pulse = 0.5 + 0.5 * math.sin(self._phase * 2 * math.pi)
-            rr = 9 + 5 * pulse
-            _c(1.0, 0.27, 0.23, 0.20 * (1 - pulse)).setFill()
+            rr = 9 + 4 * pulse
+            _c(1.0, 0.27, 0.23, 0.18 * (1 - pulse)).setFill()
             NSBezierPath.bezierPathWithOvalInRect_(
                 NSMakeRect(cx-rr, cy-rr, rr*2, rr*2)).fill()
             RED.setFill()
             NSBezierPath.bezierPathWithOvalInRect_(
                 NSMakeRect(cx-7, cy-7, 14, 14)).fill()
-        elif self._state == "transcribing":
-            dr = 2.5          # dot radius
-            sp = 7.0          # spacing between dot centres
-            # three dot centres: cx-sp, cx, cx+sp
+
+        elif m > 0.99:
+            # Pure three dots
+            sp = 7.0; dr = 2.5
             for i in range(3):
                 t = (self._phase + i / 3.0) % 1.0
                 dy = -4 * math.sin(t * math.pi) if t < 1.0 else 0
-                dot_cx = cx + (i - 1) * sp   # -sp, 0, +sp relative to cx
+                dot_cx = cx + (i - 1) * sp
                 DIM.setFill()
                 NSBezierPath.bezierPathWithOvalInRect_(
-                    NSMakeRect(dot_cx - dr, cy - dr + dy, dr*2, dr*2)).fill()
+                    NSMakeRect(dot_cx-dr, cy-dr+dy, dr*2, dr*2)).fill()
+
+        else:
+            # Morphing: dot shrinks toward center, dots fade in
+            # Red dot shrinking
+            dot_scale = 1.0 - m
+            r = 7 * dot_scale
+            red_a = 1.0 - m
+            if r > 0.5:
+                _c(1.0, 0.27, 0.23, red_a).setFill()
+                NSBezierPath.bezierPathWithOvalInRect_(
+                    NSMakeRect(cx-r, cy-r, r*2, r*2)).fill()
+            # Three dots fading in
+            sp = 7.0; dr = 2.5
+            for i in range(3):
+                t = (self._phase + i / 3.0) % 1.0
+                dy = -4 * math.sin(t * math.pi) * m if t < 1.0 else 0
+                dot_cx = cx + (i - 1) * sp * m  # spread from center
+                _c(0.48, 0.48, 0.52, m).setFill()
+                NSBezierPath.bezierPathWithOvalInRect_(
+                    NSMakeRect(dot_cx-dr, cy-dr+dy, dr*2, dr*2)).fill()
 
     def _draw_waveform(self, rect):
         w, h = rect.size.width, rect.size.height
         cy = rect.origin.y + h / 2
         n = len(self._levels)
         if n < 2: return
-        xs  = [rect.origin.x + i * w / (n - 1) for i in range(n)]
-        amp = h / 2 * 0.84
-        # Minimum amplitude keeps it curved; taper edges to zero for smooth fade-in/out
-        min_amp = 0.08
-        levels = [max(min_amp, lv) for lv in self._levels]
-        taper = 4  # number of samples to fade at each edge
+
+        # Breathing idle animation when not recording
+        if self._state != "recording":
+            breath = 0.06 + 0.04 * math.sin(self._phase * 2 * math.pi * 0.4)
+            levels = [breath + 0.03 * math.sin(
+                self._phase * 2 * math.pi * 0.7 + i * 0.4) for i in range(n)]
+        else:
+            min_amp = 0.08
+            levels = [max(min_amp, lv) for lv in self._levels]
+
+        taper = 5
         for i in range(taper):
             t = i / taper
-            levels[i] = levels[i] * t
-            levels[-(i+1)] = levels[-(i+1)] * t
+            levels[i] *= t
+            levels[-(i+1)] *= t
+
+        xs  = [rect.origin.x + i * w / (n - 1) for i in range(n)]
+        amp = h / 2 * 0.84
         top = [(xs[i], cy - levels[i] * amp) for i in range(n)]
         bot = [(xs[i], cy + levels[i] * amp) for i in range(n-1, -1, -1)]
-        (BLUE if self._state == "recording" else DIM).setFill()
+
+        color = BLUE if self._state == "recording" else DIM
+        color.setFill()
         p = _catmull(top); _catmull_ext(p, bot); p.closePath(); p.fill()
 
 
@@ -216,7 +351,7 @@ def _catmull_ext(path, pts):
 
 
 # ---------------------------------------------------------------------------
-# Overlay panel — owns the NSPanel and drives the canvas
+# Overlay panel
 # ---------------------------------------------------------------------------
 class OverlayPanel(NSObject):
 
@@ -241,10 +376,9 @@ class OverlayPanel(NSObject):
         panel.setLevel_(_FLOAT + 1)
         panel.setOpaque_(False)
         panel.setBackgroundColor_(NSColor.clearColor())
-        panel.setHasShadow_(False)
+        panel.setHasShadow_(True)
         panel.setAlphaValue_(0.0)
         canvas = _PillCanvas.alloc().initWithFrame_(NSMakeRect(0, 0, PANEL_W, PILL_H))
-        # Layer-backed so macOS shadow follows the pill shape, not the window rect
         canvas.setWantsLayer_(True)
         canvas.layer().setBackgroundColor_(NSColor.clearColor().CGColor())
         panel.setContentView_(canvas)
@@ -253,27 +387,34 @@ class OverlayPanel(NSObject):
 
     def _updateLayout(self):
         if not self._panel: return
-        text = self._transcript.strip()
-        if not text:
+        words = self._transcript.strip().split() if self._transcript.strip() else []
+
+        if not words:
             text_h = 0
         else:
-            chars = int((PANEL_W - TX_PAD_H * 2) / 7.5)
-            words = text.split(); lines = 1; cur = 0
+            chars = int((PANEL_W - TX_PAD_H * 2) / 7.8)
+            lines = 1; cur = 0
             for w in words:
                 if cur + len(w) + 1 > chars: lines += 1; cur = len(w)
                 else: cur += len(w) + 1
             text_h = min(lines, MAX_LINES) * LINE_H + TX_PAD_V * 2
+
         total_h = PILL_H + text_h
         sf = NSScreen.mainScreen().frame()
         x = (sf.size.width - PANEL_W) / 2 + sf.origin.x
         y = sf.origin.y + BOTTOM
-        self._panel.setFrame_display_(NSMakeRect(x, y, PANEL_W, total_h), True)
-        self._canvas.setFrame_(NSMakeRect(0, 0, PANEL_W, total_h))
-        self._canvas.layer().setFrame_(self._canvas.bounds())
-        if self._canvas:
-            self._canvas.setText_(text)
+        new_frame = NSMakeRect(x, y, PANEL_W, total_h)
 
-    # -- animation timer ------------------------------------------------
+        # Animated resize
+        NSAnimationContext.beginGrouping()
+        NSAnimationContext.currentContext().setDuration_(0.25)
+        self._panel.animator().setFrame_display_(new_frame, True)
+        NSAnimationContext.endGrouping()
+
+        self._canvas.setFrame_(NSMakeRect(0, 0, PANEL_W, total_h))
+        if self._canvas:
+            self._canvas.setWords_(words)
+
     def _startTimer(self):
         if self._anim_timer: return
         self._anim_timer = NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
@@ -291,9 +432,11 @@ class OverlayPanel(NSObject):
             self._canvas.setTimer_(f"{int(e//60)}:{int(e%60):02d}")
 
     # -- main thread selectors ------------------------------------------
+
     def show(self):
         if self._panel is None: self._setup()
         self._transcript = ""
+        self._canvas.clearWords_(None)
         self._updateLayout()
         self._panel.setAlphaValue_(1.0)
         self._panel.orderFrontRegardless()
@@ -312,7 +455,9 @@ class OverlayPanel(NSObject):
             self._record_start = time.time()
             if self._canvas: self._canvas.setTimer_("0:00")
         elif state == "idle":
-            if self._canvas: self._canvas.setTimer_("")
+            if self._canvas:
+                self._canvas.setTimer_("")
+                self._canvas.clearWords_(None)
             self._transcript = ""
             self._updateLayout()
 
@@ -323,7 +468,8 @@ class OverlayPanel(NSObject):
         self._transcript = text or ""
         self._updateLayout()
 
-    # -- thread-safe wrappers -------------------------------------------
+    # -- thread-safe wrappers ------------------------------------------
+
     def push_state(self, s):
         self.performSelectorOnMainThread_withObject_waitUntilDone_("setStateObj:", s, False)
     def push_levels(self, lvl):

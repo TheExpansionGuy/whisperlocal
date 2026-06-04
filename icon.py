@@ -1,5 +1,5 @@
-"""Generate assets/icon.icns from scratch using Pillow."""
-import os
+"""Generate WhisperLocal icons — soundprint style."""
+import math
 import shutil
 import subprocess
 from pathlib import Path
@@ -12,131 +12,126 @@ SIZES = [16, 32, 64, 128, 256, 512, 1024]
 def draw_icon(size: int) -> Image.Image:
     img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
-    p = size / 1024  # scale factor
+    p = size / 1024
+    cx = cy = size / 2
 
-    # Background circle
-    pad = int(32 * p)
-    d.ellipse([pad, pad, size - pad, size - pad], fill=(30, 30, 35, 255))
+    # Background circle with deep gradient (draw as layered circles)
+    bg_r = int(480 * p)
+    for i in range(bg_r, 0, -1):
+        t = i / bg_r
+        r = int(20 + (45 - 20) * t)
+        g = int(10 + (15 - 10) * t)
+        b = int(50 + (80 - 50) * t)
+        d.ellipse([cx - i, cy - i, cx + i, cy + i], fill=(r, g, b, 255))
 
-    # Mic body (rounded rect)
-    mw = int(200 * p)
-    mh = int(300 * p)
-    mx = (size - mw) // 2
-    my = int(180 * p)
-    radius = int(100 * p)
-    d.rounded_rectangle([mx, my, mx + mw, my + mh], radius=radius, fill=(255, 255, 255, 255))
+    # Soundprint — concentric arcs that look like a fingerprint
+    # Each ring is a slightly irregular ellipse arc
+    num_rings = 14
+    for ring in range(num_rings):
+        t = ring / (num_rings - 1)
+        base_r = int((60 + 340 * t) * p)
 
-    # Mic stand arc (bottom half of ellipse)
-    sw = int(360 * p)
-    sh = int(280 * p)
-    sx = (size - sw) // 2
-    sy = int(430 * p)
-    d.arc([sx, sy, sx + sw, sy + sh], start=0, end=180, fill=(255, 255, 255, 255), width=int(36 * p))
+        # Colour: inner purple → outer blue
+        cr = int(160 - 80 * t)
+        cg = int(100 + 100 * t)
+        cb = int(255)
+        alpha = int(220 - 60 * t)
+        lw = max(1, int((3.5 - 1.5 * t) * p))
 
-    # Mic stand pole
-    pole_x = size // 2
-    pole_top = int(sy + sh // 2)
-    pole_bot = int(pole_top + 100 * p)
-    lw = int(36 * p)
-    d.rectangle([pole_x - lw // 2, pole_top, pole_x + lw // 2, pole_bot], fill=(255, 255, 255, 255))
+        # Draw as segmented arcs with slight irregularities (fingerprint feel)
+        # Break each ring into segments and offset them slightly
+        segments = 3 + ring % 3
+        for seg in range(segments):
+            seg_start = (seg / segments) * 360
+            seg_end   = ((seg + 0.85) / segments) * 360
 
-    # Mic stand base
-    bw = int(220 * p)
-    bh = int(36 * p)
-    bx = (size - bw) // 2
-    by = pole_bot
-    d.rectangle([bx, by, bx + bw, by + bh], fill=(255, 255, 255, 255))
+            # Slight radial wobble per segment
+            wobble = int(8 * p * math.sin(ring * 1.3 + seg * 2.1))
+            rx = base_r + wobble
+            ry = int(base_r * (0.72 + 0.06 * math.sin(ring * 0.8)))
 
-    # Slight glow
-    glow = img.filter(ImageFilter.GaussianBlur(radius=int(6 * p)))
-    out = Image.alpha_composite(glow, img)
-    return out
+            box = [cx - rx, cy - ry, cx + rx, cy + ry]
+            d.arc(box, start=seg_start + 5, end=seg_end - 5,
+                  fill=(cr, cg, cb, alpha), width=lw)
+
+    # Central mic mark — minimal, clean
+    mc_w = int(52 * p)
+    mc_h = int(72 * p)
+    mc_x = cx - mc_w / 2
+    mc_y = cy - mc_h / 2 - int(10 * p)
+    radius = int(26 * p)
+    d.rounded_rectangle([mc_x, mc_y, mc_x + mc_w, mc_y + mc_h],
+                        radius=radius, fill=(255, 255, 255, 220))
+
+    # Stand arc
+    sw = int(90 * p); sh = int(60 * p)
+    sx = cx - sw / 2; sy = cy + int(16 * p)
+    d.arc([sx, sy, sx + sw, sy + sh], start=0, end=180,
+          fill=(255, 255, 255, 200), width=max(2, int(7 * p)))
+
+    # Pole + base
+    pole_x = int(cx); pole_top = int(sy + sh / 2); pole_bot = int(pole_top + 22 * p)
+    lw2 = max(2, int(7 * p))
+    d.rectangle([pole_x - lw2//2, pole_top, pole_x + lw2//2, pole_bot],
+                fill=(255, 255, 255, 200))
+    bw = int(54 * p)
+    d.rectangle([cx - bw//2, pole_bot, cx + bw//2, pole_bot + max(2, int(7*p))],
+                fill=(255, 255, 255, 200))
+
+    # Soft glow
+    glow = img.filter(ImageFilter.GaussianBlur(radius=max(1, int(4 * p))))
+    return Image.alpha_composite(glow, img)
 
 
-def build():
-    assets = Path("assets")
-    assets.mkdir(exist_ok=True)
-
-    iconset = assets / "icon.iconset"
-    if iconset.exists():
-        shutil.rmtree(iconset)
-    iconset.mkdir()
-
-    for size in SIZES:
-        img = draw_icon(size)
-        img.save(iconset / f"icon_{size}x{size}.png")
-        if size <= 512:
-            img2 = draw_icon(size * 2)
-            img2.save(iconset / f"icon_{size}x{size}@2x.png")
-
-    icns = assets / "icon.icns"
-    subprocess.run(["iconutil", "-c", "icns", str(iconset), "-o", str(icns)], check=True)
-    shutil.rmtree(iconset)
-    print(f"Icon written to {icns}")
-
-
-def draw_menubar_icon(size: int = 44) -> Image.Image:
-    """Black mic on transparent background — used as a menu bar template image."""
+def draw_menubar_icon(size: int = 44, state: str = "idle") -> Image.Image:
     img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
     p = size / 44
+    cx = cy = size / 2
+
+    color = (0, 0, 0, 255)  # template image — black on transparent
 
     # Mic body
     mw = int(12 * p); mh = int(18 * p)
     mx = (size - mw) // 2; my = int(4 * p)
-    d.rounded_rectangle([mx, my, mx + mw, my + mh], radius=int(6 * p), fill=(0, 0, 0, 255))
+    d.rounded_rectangle([mx, my, mx + mw, my + mh],
+                        radius=int(6 * p), fill=color)
 
     # Stand arc
     sw = int(22 * p); sh = int(14 * p)
     sx = (size - sw) // 2; sy = int(17 * p)
-    d.arc([sx, sy, sx + sw, sy + sh], start=0, end=180, fill=(0, 0, 0, 255), width=max(2, int(2.5 * p)))
+    d.arc([sx, sy, sx + sw, sy + sh], start=0, end=180,
+          fill=color, width=max(2, int(2.5 * p)))
 
-    # Pole
-    cx = size // 2; pole_top = int(sy + sh // 2); pole_bot = int(pole_top + 6 * p)
+    # Pole + base
     lw = max(2, int(2.5 * p))
-    d.rectangle([cx - lw // 2, pole_top, cx + lw // 2, pole_bot], fill=(0, 0, 0, 255))
+    pole_top = int(sy + sh // 2); pole_bot = int(pole_top + 6 * p)
+    d.rectangle([cx - lw//2, pole_top, cx + lw//2, pole_bot], fill=color)
+    bw = int(14 * p)
+    d.rectangle([(size - bw)//2, pole_bot, (size + bw)//2,
+                 pole_bot + max(2, int(2*p))], fill=color)
 
-    # Base
-    bw = int(14 * p); bh = max(2, int(2 * p))
-    d.rectangle([(size - bw) // 2, pole_bot, (size + bw) // 2, pole_bot + bh], fill=(0, 0, 0, 255))
+    if state == "recording":
+        # Small filled circle top-right
+        dr = int(4 * p)
+        d.ellipse([size - dr*2 - 1, 1, size - 1, dr*2 + 1], fill=color)
+    elif state == "processing":
+        # Three small dots at bottom
+        dr = int(2 * p)
+        y = size - dr * 2 - 1
+        for i, x in enumerate([int(size*0.3), int(size*0.5), int(size*0.7)]):
+            d.ellipse([x-dr, y-dr, x+dr, y+dr], fill=color)
 
-    return img
-
-
-def draw_menubar_recording(size: int = 44) -> Image.Image:
-    """Mic with a filled dot — recording state."""
-    img = draw_menubar_icon(size)
-    d = ImageDraw.Draw(img)
-    p = size / 44
-    r = int(5 * p)
-    cx = size - r - int(2 * p)
-    cy = r + int(2 * p)
-    d.ellipse([cx - r, cy - r, cx + r, cy + r], fill=(0, 0, 0, 255))
-    return img
-
-
-def draw_menubar_processing(size: int = 44) -> Image.Image:
-    """Mic with ellipsis dots — transcribing state."""
-    img = draw_menubar_icon(size)
-    d = ImageDraw.Draw(img)
-    p = size / 44
-    r = int(2 * p)
-    y = int(38 * p)
-    for i, x in enumerate([int(15 * p), int(22 * p), int(29 * p)]):
-        d.ellipse([x - r, y - r, x + r, y + r], fill=(0, 0, 0, 255))
     return img
 
 
 def build_menubar():
     assets = Path("assets")
     assets.mkdir(exist_ok=True)
-    for name, fn in [
-        ("menubar", draw_menubar_icon),
-        ("menubar_rec", draw_menubar_recording),
-        ("menubar_proc", draw_menubar_processing),
-    ]:
-        fn(22).save(assets / f"{name}.png")
-        fn(44).save(assets / f"{name}@2x.png")
+    for name, state in [("menubar", "idle"), ("menubar_rec", "recording"),
+                        ("menubar_proc", "processing")]:
+        draw_menubar_icon(22, state).save(assets / f"{name}.png")
+        draw_menubar_icon(44, state).save(assets / f"{name}@2x.png")
     print("Menu bar icons written to assets/")
 
 
@@ -153,8 +148,7 @@ def build():
         img = draw_icon(size)
         img.save(iconset / f"icon_{size}x{size}.png")
         if size <= 512:
-            img2 = draw_icon(size * 2)
-            img2.save(iconset / f"icon_{size}x{size}@2x.png")
+            draw_icon(size * 2).save(iconset / f"icon_{size}x{size}@2x.png")
 
     icns = assets / "icon.icns"
     subprocess.run(["iconutil", "-c", "icns", str(iconset), "-o", str(icns)], check=True)
