@@ -291,15 +291,15 @@ class WhisperLocal(rumps.App):
         """Run MLX Whisper in a subprocess using the venv Python."""
         import json, os
         venv_python = self._venv_python()
-        venv_dir = str(Path(venv_python).parent.parent)
 
-        # Build a clean env with venv paths so native extensions load correctly
-        env = os.environ.copy()
-        env["VIRTUAL_ENV"] = venv_dir
-        env["PATH"] = str(Path(venv_python).parent) + ":" + env.get("PATH", "")
-        # Remove app bundle's stripped DYLD paths so system libs are found
-        env.pop("DYLD_LIBRARY_PATH", None)
-        env.pop("DYLD_FRAMEWORK_PATH", None)
+        # Use a minimal clean env — app bundle injects DYLD vars that break mlx
+        env = {
+            "HOME":    str(Path.home()),
+            "USER":    os.environ.get("USER", ""),
+            "TMPDIR":  os.environ.get("TMPDIR", "/tmp"),
+            "PATH":    f"{Path(venv_python).parent}:/usr/bin:/bin:/usr/local/bin",
+            "LANG":    "en_US.UTF-8",
+        }
 
         try:
             result = subprocess.run(
