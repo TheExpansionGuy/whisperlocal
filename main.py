@@ -46,7 +46,7 @@ WAVEFORM_BINS = 48
 WAVEFORM_WINDOW = collections.deque([0.02] * WAVEFORM_BINS, maxlen=WAVEFORM_BINS)
 
 PARTIAL_INTERVAL = 2.0
-MAX_RECORD_SECS = 30  # auto-stop if user forgets to release
+MAX_RECORD_SECS = 300  # 5 minutes max recording
 
 
 def load_config() -> dict:

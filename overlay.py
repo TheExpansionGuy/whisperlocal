@@ -9,7 +9,6 @@ from AppKit import (
     NSParagraphStyleAttributeName, NSMutableParagraphStyle,
     NSTextAlignmentCenter, NSTextAlignmentLeft, NSTextAlignmentRight,
     NSLineBreakByTruncatingTail, NSLineBreakByWordWrapping,
-    NSGraphicsContext,
 )
 from Foundation import NSMakePoint, NSObject, NSTimer, NSString
 
@@ -109,55 +108,48 @@ class _PillCanvas(NSView):
     def drawRect_(self, rect):
         total_h = rect.size.height
 
-        # 1. Clip entire drawing to pill shape — no subview can escape this
+        # Clip everything to the pill — addClip() intersects with AppKit's
+        # existing dirty-rect clip; no save/restore needed, state resets after drawRect_
         pill = NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
             rect, CORNER, CORNER)
-        NSGraphicsContext.currentContext().saveGraphicsState()
         pill.addClip()
 
-        # 2. Background fill
-        BG.setFill()
-        pill.fill()
+        # Background + border drawn as one filled pill + inset stroke
+        BG.setFill(); pill.fill()
+        inset = NSMakeRect(0.5, 0.5, rect.size.width - 1, rect.size.height - 1)
+        NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
+            inset, CORNER - 0.5, CORNER - 0.5
+        ).setLineWidth_(1.0)
+        border_path = NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
+            inset, CORNER - 0.5, CORNER - 0.5)
+        border_path.setLineWidth_(1.0); RING.setStroke(); border_path.stroke()
 
-        # 3. Divider between transcript and pill strip
+        # Divider
         if total_h > PILL_H + 2:
             div = NSBezierPath.bezierPath()
             div.moveToPoint_(NSMakePoint(PAD, PILL_H))
-            div.lineToPoint_(NSMakePoint(total_h - PAD, PILL_H))
+            div.lineToPoint_(NSMakePoint(rect.size.width - PAD, PILL_H))
             div.setLineWidth_(0.5); DIVIDER.setStroke(); div.stroke()
 
-        # 4. Transcript text
+        # Transcript text
         if self._text and total_h > PILL_H + 2:
-            tx_rect = NSMakeRect(TX_PAD_H, PILL_H + TX_PAD_V,
-                                 PANEL_W - TX_PAD_H * 2,
-                                 total_h - PILL_H - TX_PAD_V * 2)
-            _draw_text(self._text, _ATTRS_TX, tx_rect)
+            _draw_text(self._text, _ATTRS_TX,
+                       NSMakeRect(TX_PAD_H, PILL_H + TX_PAD_V,
+                                  PANEL_W - TX_PAD_H * 2,
+                                  total_h - PILL_H - TX_PAD_V * 2))
 
-        # 5. Indicator (dot or dots) — centred in pill strip
-        cx = IND_X + IND_W / 2
-        cy = PILL_H / 2
-        self._draw_indicator(cx, cy)
+        # Indicator
+        self._draw_indicator(IND_X + IND_W / 2, PILL_H / 2)
 
-        # 6. Waveform
-        self._draw_waveform(
-            NSMakeRect(WAV_X, (PILL_H - 30) / 2, WAV_W, 30))
+        # Waveform
+        self._draw_waveform(NSMakeRect(WAV_X, (PILL_H - 30) / 2, WAV_W, 30))
 
-        # 7. State label
+        # State label + timer
         _draw_text(
             {"recording": "Listening", "transcribing": "Transcribing"}.get(self._state, ""),
-            _ATTRS_STATE,
-            _vcenter_rect(LBL_X, LBL_W, 16, 0, PILL_H))
-
-        # 8. Timer
+            _ATTRS_STATE, _vcenter_rect(LBL_X, LBL_W, 16, 0, PILL_H))
         _draw_text(self._timer, _ATTRS_TIMER,
                    _vcenter_rect(TMR_X, TMR_W, 16, 0, PILL_H))
-
-        # 9. Border ring (drawn last, on top)
-        NSGraphicsContext.currentContext().restoreGraphicsState()
-        inset = NSMakeRect(0.5, 0.5, rect.size.width - 1, rect.size.height - 1)
-        border = NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
-            inset, CORNER - 0.5, CORNER - 0.5)
-        border.setLineWidth_(1.0); RING.setStroke(); border.stroke()
 
     def _draw_indicator(self, cx, cy):
         if self._state == "recording":
@@ -170,13 +162,16 @@ class _PillCanvas(NSView):
             NSBezierPath.bezierPathWithOvalInRect_(
                 NSMakeRect(cx-7, cy-7, 14, 14)).fill()
         elif self._state == "transcribing":
-            sp=9.0; dr=3.0; x0=cx-sp
+            dr = 2.5          # dot radius
+            sp = 7.0          # spacing between dot centres
+            # three dot centres: cx-sp, cx, cx+sp
             for i in range(3):
                 t = (self._phase + i / 3.0) % 1.0
-                dy = -5 * math.sin(t * math.pi) if t < 1.0 else 0
+                dy = -4 * math.sin(t * math.pi) if t < 1.0 else 0
+                dot_cx = cx + (i - 1) * sp   # -sp, 0, +sp relative to cx
                 DIM.setFill()
                 NSBezierPath.bezierPathWithOvalInRect_(
-                    NSMakeRect(x0+i*sp-dr, cy-dr+dy, dr*2, dr*2)).fill()
+                    NSMakeRect(dot_cx - dr, cy - dr + dy, dr*2, dr*2)).fill()
 
     def _draw_waveform(self, rect):
         w, h = rect.size.width, rect.size.height
@@ -185,8 +180,11 @@ class _PillCanvas(NSView):
         if n < 2: return
         xs  = [rect.origin.x + i * w / (n - 1) for i in range(n)]
         amp = h / 2 * 0.84
-        top = [(xs[i], cy - self._levels[i] * amp) for i in range(n)]
-        bot = [(xs[i], cy + self._levels[i] * amp) for i in range(n-1, -1, -1)]
+        # Enforce a minimum amplitude so waveform is always curved, never a flat rectangle
+        min_amp = 0.08
+        levels = [max(min_amp, lv) for lv in self._levels]
+        top = [(xs[i], cy - levels[i] * amp) for i in range(n)]
+        bot = [(xs[i], cy + levels[i] * amp) for i in range(n-1, -1, -1)]
         (BLUE if self._state == "recording" else DIM).setFill()
         p = _catmull(top); _catmull_ext(p, bot); p.closePath(); p.fill()
 
@@ -238,9 +236,12 @@ class OverlayPanel(NSObject):
         panel.setLevel_(_FLOAT + 1)
         panel.setOpaque_(False)
         panel.setBackgroundColor_(NSColor.clearColor())
-        panel.setHasShadow_(True)
+        panel.setHasShadow_(False)
         panel.setAlphaValue_(0.0)
         canvas = _PillCanvas.alloc().initWithFrame_(NSMakeRect(0, 0, PANEL_W, PILL_H))
+        # Layer-backed so macOS shadow follows the pill shape, not the window rect
+        canvas.setWantsLayer_(True)
+        canvas.layer().setBackgroundColor_(NSColor.clearColor().CGColor())
         panel.setContentView_(canvas)
         self._panel  = panel
         self._canvas = canvas
@@ -263,6 +264,7 @@ class OverlayPanel(NSObject):
         y = sf.origin.y + BOTTOM
         self._panel.setFrame_display_(NSMakeRect(x, y, PANEL_W, total_h), True)
         self._canvas.setFrame_(NSMakeRect(0, 0, PANEL_W, total_h))
+        self._canvas.layer().setFrame_(self._canvas.bounds())
         if self._canvas:
             self._canvas.setText_(text)
 
