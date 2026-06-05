@@ -21,7 +21,7 @@ from pynput import keyboard
 # ---------------------------------------------------------------------------
 
 CONFIG_PATH = Path.home() / ".whisperlocal" / "config.json"
-DEFAULTS = {"model": "mlx-community/whisper-base.en-mlx", "filler_removal": True, "history": []}
+DEFAULTS = {"model": "mlx-community/whisper-small.en-mlx", "filler_removal": True, "history": []}
 HISTORY_MAX = 10
 
 FILLER_RE = re.compile(
@@ -52,8 +52,9 @@ ICON_TRANSCRIBING = str(_RESOURCES / "assets" / "menubar_proc.png")
 WAVEFORM_BINS = 48
 WAVEFORM_WINDOW = collections.deque([0.02] * WAVEFORM_BINS, maxlen=WAVEFORM_BINS)
 
-PARTIAL_INTERVAL = 2.0
-MAX_RECORD_SECS = 300  # 5 minutes max recording
+CHUNK_INTERVAL  = 1.5   # transcribe a new chunk every N seconds while speaking
+CHUNK_SECS      = 3.0   # seconds of audio per chunk (overlap gives Whisper context)
+MAX_RECORD_SECS = 300
 
 
 def load_config() -> dict:
@@ -85,14 +86,16 @@ class WhisperLocal(rumps.App):
         self.audio_chunks = []
         self.stream = None
         self._kb = keyboard.Controller()
-        self._model_lock = threading.Lock()
-        self._partial_timer = None
-        self._timeout_timer = None
-        self._cancelled = False
-        self._transcribing = False
+        self._model_lock     = threading.Lock()
+        self._partial_timer  = None
+        self._timeout_timer  = None
+        self._cancelled      = False
+        self._transcribing   = False
         self._target_element = None
-        self._target_app = None
-        self._model_ready = False    # True once warm-up completes
+        self._target_app     = None
+        self._model_ready    = False
+        self._accumulated    = ""    # transcript built up during recording
+        self._chunk_offset   = 0     # index into audio_chunks already transcribed
 
         # Overlay (AppKit panel — created lazily on main thread)
         from overlay import OverlayPanel
@@ -319,16 +322,19 @@ class WhisperLocal(rumps.App):
                 self._status_item.title = f"MLX ❌ {str(e)[:60]}"
         self._set_state("idle")
 
-    def _run_transcription(self, audio: np.ndarray) -> str:
-        """Send audio to persistent worker, return text. No subprocess startup cost."""
+    def _run_transcription(self, audio: np.ndarray, prompt: str = "") -> str:
+        """Send audio (+ optional context prompt) to persistent worker, return text."""
         if not hasattr(self, "_worker") or self._worker.poll() is not None:
             return ""
         try:
             data = audio.tobytes()
-            self._worker.stdin.write(f"{len(data)}\n".encode() + data)
+            header = json.dumps({"n": len(data), "prompt": prompt[-200:]}).encode()
+            self._worker.stdin.write(header + b"\n" + data)
             self._worker.stdin.flush()
             line = self._worker.stdout.readline()
-            return json.loads(line.strip()) if line.strip() else ""
+            if not line.strip():
+                return ""
+            return json.loads(line.strip()).get("text", "")
         except Exception as e:
             print(f"Transcription error: {e}")
             return ""
@@ -379,9 +385,11 @@ class WhisperLocal(rumps.App):
             return
         if not self._is_hotkey(key) or self.recording or not self._model_ready:
             return
-        self._cancelled = False
+        self._cancelled    = False
+        self._accumulated  = ""
+        self._chunk_offset = 0
         self._target_element, self._target_app = self._snapshot_focus()
-        self.recording = True
+        self.recording    = True
         self.audio_chunks = []
         WAVEFORM_WINDOW.extend([0.02] * WAVEFORM_BINS)
         self._set_state("recording")
@@ -448,11 +456,11 @@ class WhisperLocal(rumps.App):
         self._overlay.push_levels(list(WAVEFORM_WINDOW))
 
     # ------------------------------------------------------------------
-    # Partial (live) transcription
+    # Streaming transcription — transcribe chunks WHILE recording
     # ------------------------------------------------------------------
 
     def _start_partial_timer(self):
-        self._partial_timer = threading.Timer(PARTIAL_INTERVAL, self._partial_tick)
+        self._partial_timer = threading.Timer(CHUNK_INTERVAL, self._chunk_tick)
         self._partial_timer.daemon = True
         self._partial_timer.start()
 
@@ -471,50 +479,61 @@ class WhisperLocal(rumps.App):
             self._timeout_timer.cancel()
             self._timeout_timer = None
 
-    def _partial_tick(self):
-        if not self.recording or not self.audio_chunks:
+    def _chunk_tick(self):
+        """Fire periodically while recording: transcribe newly-arrived audio."""
+        if not self.recording:
             return
-        chunks = list(self.audio_chunks)
-        threading.Thread(target=self._run_partial, args=(chunks,), daemon=True).start()
+        threading.Thread(target=self._process_chunk, daemon=True).start()
         # Reschedule
-        self._partial_timer = threading.Timer(PARTIAL_INTERVAL, self._partial_tick)
+        self._partial_timer = threading.Timer(CHUNK_INTERVAL, self._chunk_tick)
         self._partial_timer.daemon = True
         self._partial_timer.start()
 
-    def _run_partial(self, chunks):
+    def _process_chunk(self):
+        """Transcribe audio that's accumulated since the last committed offset."""
+        if not self._model_lock.acquire(blocking=False):
+            return  # a transcription is already in flight; skip this tick
         try:
-            audio = np.concatenate(chunks).flatten()
-            if len(audio) < SAMPLE_RATE * 0.5:
-                return
-            with self._model_lock:
-                text = self._run_transcription(audio)
-            if text:
-                self._overlay.push_text(text)
-        except Exception:
-            pass
-
-    # ------------------------------------------------------------------
-    # Final transcription
-    # ------------------------------------------------------------------
-
-    def _transcribe_final(self):
-        try:
-            if self._cancelled or not self.audio_chunks:
+            if not self.audio_chunks:
                 return
             audio = np.concatenate(self.audio_chunks).flatten()
-            if len(audio) < SAMPLE_RATE * 0.3:
+            new_audio = audio[self._chunk_offset:]
+            # Wait until enough new audio has built up
+            if len(new_audio) < int(SAMPLE_RATE * 1.0):
+                return
+            text = self._run_transcription(new_audio, self._accumulated)
+            self._chunk_offset = len(audio)
+            if text:
+                self._accumulated = (self._accumulated + " " + text).strip()
+                self._overlay.push_text(self._accumulated)
+        except Exception as e:
+            print(f"Chunk error: {e}")
+        finally:
+            self._model_lock.release()
+
+    def _transcribe_final(self):
+        """On release: transcribe any remaining tail, then paste the full transcript."""
+        try:
+            if self._cancelled:
                 return
             with self._model_lock:
-                text = self._run_transcription(audio)
+                if self.audio_chunks:
+                    audio = np.concatenate(self.audio_chunks).flatten()
+                    tail = audio[self._chunk_offset:]
+                    if len(tail) >= int(SAMPLE_RATE * 0.2):
+                        text = self._run_transcription(tail, self._accumulated)
+                        if text:
+                            self._accumulated = (self._accumulated + " " + text).strip()
+                    self._chunk_offset = len(audio)
+
+            final = self._accumulated.strip()
             if self.cfg["filler_removal"]:
-                text = FILLER_RE.sub("", text).strip()
-            if not text:
+                final = FILLER_RE.sub("", final).strip()
+            if not final:
                 return
-            self._overlay.push_text(text)
-            time.sleep(0.8)   # show final text briefly before hiding
-            self._add_history(text)
-            self._paste(text)
-            rumps.notification("WhisperLocal", None, text[:100], sound=False)
+            self._overlay.push_text(final)
+            self._add_history(final)
+            self._paste(final)
         finally:
             self._transcribing = False
             self._overlay.push_state("idle")

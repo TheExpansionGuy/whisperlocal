@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-"""Persistent transcription worker.
+"""Persistent streaming transcription worker.
 Protocol:
-  startup: prints "READY\\n" once warm
-  per request: reads "<n_bytes>\\n" then n_bytes float32 audio, writes JSON text + "\\n"
-  shutdown: reads "QUIT\\n"
+  startup:     prints "READY\\n"
+  per request: reads JSON header line: {"n": <bytes>, "prompt": "<prev text>"}
+               then reads n bytes of float32 audio
+               writes JSON: {"text": "<transcribed>"} + "\\n"
+  shutdown:    reads "QUIT\\n"
 """
 import sys
 import io
@@ -14,45 +16,48 @@ def main():
     model = sys.argv[1]
     lang  = sys.argv[2] if len(sys.argv) > 2 else "en"
 
-    # Silence stdout/stderr during import and warm-up so nothing
-    # accidentally gets written to the pipe before READY
-    _real_stdout = sys.stdout
-    _real_stderr = sys.stderr
-    sys.stdout   = io.StringIO()
-    sys.stderr   = io.StringIO()
-
+    # Silence all output during import + warm-up
+    _out, _err = sys.stdout, sys.stderr
+    sys.stdout  = io.StringIO()
+    sys.stderr  = io.StringIO()
     try:
         import mlx_whisper
         silence = np.zeros(16000, dtype=np.float32)
-        mlx_whisper.transcribe(
-            silence, path_or_hf_repo=model, language=lang, verbose=False)
+        mlx_whisper.transcribe(silence, path_or_hf_repo=model,
+                               language=lang, verbose=False)
     except Exception as e:
-        sys.stdout = _real_stdout
-        sys.stderr = _real_stderr
-        print(f"ERROR: {e}", flush=True)
+        sys.stdout, sys.stderr = _out, _err
+        print(f"ERROR:{e}", flush=True)
         return
     finally:
-        sys.stdout = _real_stdout
-        sys.stderr = _real_stderr
+        sys.stdout, sys.stderr = _out, _err
 
     sys.stdout.write("READY\n")
     sys.stdout.flush()
 
     while True:
-        header = sys.stdin.buffer.readline().strip()
-        if not header or header == b"QUIT":
+        header_line = sys.stdin.buffer.readline().strip()
+        if not header_line or header_line == b"QUIT":
             break
         try:
-            n_bytes = int(header.decode())
+            header  = json.loads(header_line.decode())
+            n_bytes = header["n"]
+            prompt  = header.get("prompt", "")
             data    = sys.stdin.buffer.read(n_bytes)
             audio   = np.frombuffer(data, dtype=np.float32)
-            result  = mlx_whisper.transcribe(
-                audio, path_or_hf_repo=model, language=lang, verbose=False)
-            text = result.get("text", "").strip()
-            print(json.dumps(text), flush=True)
+
+            kwargs = dict(path_or_hf_repo=model, language=lang, verbose=False)
+            if prompt:
+                kwargs["initial_prompt"] = prompt
+
+            result = mlx_whisper.transcribe(audio, **kwargs)
+            text   = result.get("text", "").strip()
+            sys.stdout.write(json.dumps({"text": text}) + "\n")
+            sys.stdout.flush()
         except Exception as e:
-            print(json.dumps(""), flush=True)
-            print(f"Error: {e}", file=sys.stderr)
+            sys.stdout.write(json.dumps({"text": ""}) + "\n")
+            sys.stdout.flush()
+            print(f"chunk error: {e}", file=sys.stderr)
 
 if __name__ == "__main__":
     main()
