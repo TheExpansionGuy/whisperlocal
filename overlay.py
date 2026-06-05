@@ -363,26 +363,46 @@ class _PillCanvas(NSView):
         # Breathing idle animation when not recording
         if self._state != "recording":
             breath = 0.06 + 0.04 * math.sin(self._phase * 2 * math.pi * 0.4)
-            levels = [breath + 0.03 * math.sin(
+            base = [breath + 0.03 * math.sin(
                 self._phase * 2 * math.pi * 0.7 + i * 0.4) for i in range(n)]
+            active = False
         else:
             min_amp = 0.08
-            levels = [max(min_amp, lv) for lv in self._levels]
-
-        taper = 5
-        for i in range(taper):
-            t = i / taper
-            levels[i] *= t
-            levels[-(i+1)] *= t
+            base = [max(min_amp, lv) for lv in self._levels]
+            active = True
 
         xs  = [rect.origin.x + i * w / (n - 1) for i in range(n)]
-        amp = h / 2 * 0.84
-        top = [(xs[i], cy - levels[i] * amp) for i in range(n)]
-        bot = [(xs[i], cy + levels[i] * amp) for i in range(n-1, -1, -1)]
+        amp = h / 2 * 0.9
 
-        color = BLUE if self._state == "recording" else DIM
-        color.setFill()
-        p = _catmull(top); _catmull_ext(p, bot); p.closePath(); p.fill()
+        # Three layered, phase-shifted lines for depth. Back layers are dimmer
+        # and slightly smaller, animated with a travelling wobble.
+        if active:
+            layers = [
+                (BLUE,  1.00, 0.0),
+                (_c(0.42, 0.78, 1.00, 0.45), 0.66, 1.7),
+                (_c(0.62, 0.55, 1.00, 0.30), 0.40, 3.4),
+            ]
+        else:
+            layers = [(DIM, 1.00, 0.0), (_c(0.5, 0.5, 0.54, 0.4), 0.6, 2.0)]
+
+        for color, scale, shift in layers:
+            levels = []
+            for i in range(n):
+                # travelling shimmer so back layers feel alive
+                wob = 1.0 + (0.18 * math.sin(self._phase * 2 * math.pi + i * 0.5 + shift)
+                             if active else 0.0)
+                levels.append(base[i] * scale * wob)
+            # taper edges to zero for a smooth fade
+            taper = 5
+            for i in range(taper):
+                t = i / taper
+                levels[i] *= t
+                levels[-(i + 1)] *= t
+
+            top = [(xs[i], cy - levels[i] * amp) for i in range(n)]
+            bot = [(xs[i], cy + levels[i] * amp) for i in range(n - 1, -1, -1)]
+            color.setFill()
+            p = _catmull(top); _catmull_ext(p, bot); p.closePath(); p.fill()
 
 
 def _catmull(pts):
@@ -451,11 +471,17 @@ class OverlayPanel(NSObject):
         if not words:
             text_h = 0
         else:
-            chars = int((panel_w - TX_PAD_H * 2) / 7.8)
-            lines = 1; cur = 0
-            for w in words:
-                if cur + len(w) + 1 > chars: lines += 1; cur = len(w)
-                else: cur += len(w) + 1
+            # Measure real word widths (same logic as drawing) so we reserve the
+            # exact number of lines and never leave an empty trailing line.
+            max_w = panel_w - TX_PAD_H * 2
+            attrs = {NSFontAttributeName: _FONT_TX}
+            lines = 1; cur_w = 0.0
+            for word in words:
+                wd = NSString.stringWithString_(word + " ").sizeWithAttributes_(attrs).width
+                if cur_w + wd > max_w and cur_w > 0:
+                    lines += 1; cur_w = wd
+                else:
+                    cur_w += wd
             text_h = min(lines, MAX_LINES) * LINE_H + TX_PAD_V * 2
 
         total_h = PILL_H + text_h

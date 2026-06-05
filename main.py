@@ -147,6 +147,7 @@ class WhisperLocal(rumps.App):
         self._committed_text  = ""   # settled transcript, no longer re-transcribed
         self._committed_samples = 0  # audio samples already finalized
         self._prev_words      = []   # last tick's uncommitted hypothesis (normalized)
+        self._paused          = False
 
         # Overlay (AppKit panel — created lazily on main thread)
         from overlay import OverlayPanel
@@ -445,16 +446,28 @@ class WhisperLocal(rumps.App):
         NSKeyDownMask      = 1 << 10
 
         alt_was_down = [False]
+        shift_was_down = [False]
 
         def flags_handler(event):
-            # NSAlternateKeyMask = 0x00080000
-            alt_now = bool(event.modifierFlags() & 0x00080000)
+            flags = event.modifierFlags()
+            alt_now   = bool(flags & 0x00080000)  # NSAlternateKeyMask
+            shift_now = bool(flags & 0x00020000)  # NSShiftKeyMask
+
+            # Right Option edge → start / stop recording
             if alt_now and not alt_was_down[0]:
                 alt_was_down[0] = True
                 self._on_press(keyboard.Key.alt_r)
             elif not alt_now and alt_was_down[0]:
                 alt_was_down[0] = False
                 self._on_release(keyboard.Key.alt_r)
+
+            # Shift tap while recording → toggle pause
+            if shift_now and not shift_was_down[0]:
+                shift_was_down[0] = True
+                if self.recording:
+                    self._toggle_pause()
+            elif not shift_now and shift_was_down[0]:
+                shift_was_down[0] = False
 
         def key_handler(event):
             # keyCode 53 = Escape
@@ -483,6 +496,7 @@ class WhisperLocal(rumps.App):
         self._committed_text    = ""
         self._committed_samples = 0
         self._prev_words        = []
+        self._paused            = False
         self._target_element, self._target_app = self._snapshot_focus()
         self.recording    = True
         self.audio_chunks = []
@@ -540,9 +554,19 @@ class WhisperLocal(rumps.App):
         self._overlay.hide_async()
         self._set_state("idle")
 
+    def _toggle_pause(self):
+        """Pause/resume recording mid-dictation (tap Shift while holding ⌥)."""
+        self._paused = not self._paused
+        if self._paused:
+            self._stop_partial_timer()
+            self._overlay.push_state("paused")
+        else:
+            self._overlay.push_state("recording")
+            self._start_partial_timer()
+
     def _audio_cb(self, indata, frames, t, status):
-        if not self.recording:
-            return
+        if not self.recording or self._paused:
+            return  # paused → drop audio so the gap isn't recorded
         chunk = indata.copy()
         self.audio_chunks.append(chunk)
         # Decibel-based level so quiet / distant speech still shows clearly.
