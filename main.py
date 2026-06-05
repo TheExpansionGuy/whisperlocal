@@ -22,7 +22,8 @@ from pynput import keyboard
 # ---------------------------------------------------------------------------
 
 CONFIG_PATH = Path.home() / ".whisperlocal" / "config.json"
-DEFAULTS = {"model": "mlx-community/whisper-small.en-mlx", "filler_removal": True, "history": []}
+DEFAULTS = {"model": "mlx-community/whisper-small.en-mlx", "filler_removal": True,
+            "llm_cleanup": False, "history": []}
 HISTORY_MAX = 10
 
 FILLER_RE = re.compile(
@@ -199,6 +200,10 @@ class WhisperLocal(rumps.App):
         self._build_mic_menu(mic_item)
         self.menu.add(mic_item)
 
+        llm_item = rumps.MenuItem("AI Cleanup (LLM)", callback=self._toggle_llm)
+        llm_item.state = int(self.cfg.get("llm_cleanup", False))
+        self.menu.add(llm_item)
+
         self.menu.add(rumps.separator)
         self.menu.add(rumps.MenuItem("Check Accessibility…", callback=self._open_accessibility))
         self._status_item = rumps.MenuItem("Listener: starting…")
@@ -243,6 +248,11 @@ class WhisperLocal(rumps.App):
     def _toggle_filler(self, sender):
         self.cfg["filler_removal"] = not self.cfg["filler_removal"]
         sender.state = int(self.cfg["filler_removal"])
+        save_config(self.cfg)
+
+    def _toggle_llm(self, sender):
+        self.cfg["llm_cleanup"] = not self.cfg.get("llm_cleanup", False)
+        sender.state = int(self.cfg["llm_cleanup"])
         save_config(self.cfg)
 
     def _build_mic_menu(self, parent):
@@ -366,6 +376,26 @@ class WhisperLocal(rumps.App):
     def _run_transcription(self, audio: np.ndarray, prompt: str = "") -> str:
         """Return plain text only."""
         return self._run_transcription_full(audio, prompt).get("text", "")
+
+    def _run_cleanup(self, text: str) -> str:
+        """Send text to the worker's LLM cleanup. Returns cleaned text (or original)."""
+        if not hasattr(self, "_worker") or self._worker.poll() is not None:
+            return text
+        try:
+            with self._model_lock:
+                header = json.dumps({"cleanup": text}).encode()
+                self._worker.stdin.write(header + b"\n")
+                self._worker.stdin.flush()
+                line = self._worker.stdout.readline()
+            if not line.strip():
+                return text
+            resp = json.loads(line.strip())
+            secs = resp.get("secs", 0)
+            print(f"LLM cleanup took {secs:.2f}s")
+            return resp.get("text", text)
+        except Exception as e:
+            print(f"Cleanup error: {e}")
+            return text
 
     def _run_transcription_full(self, audio: np.ndarray, prompt: str = "",
                                 words: bool = False) -> dict:
@@ -611,6 +641,14 @@ class WhisperLocal(rumps.App):
                 final = FILLER_RE.sub("", final).strip()
             if not final:
                 return
+
+            # Optional LLM cleanup pass
+            if self.cfg.get("llm_cleanup", False):
+                self._overlay.push_text(final + "  ✨")
+                cleaned = self._run_cleanup(final)
+                if cleaned:
+                    final = cleaned
+
             self._overlay.push_text(final)
             self._add_history(final)
             self._paste(final)
