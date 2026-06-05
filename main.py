@@ -175,6 +175,9 @@ class WhisperLocal(rumps.App):
         self._committed_samples = 0  # audio samples already finalized
         self._prev_words      = []   # last tick's uncommitted hypothesis (normalized)
         self._paused          = False
+        self._editing         = False  # review editor open
+        self._append_mode     = False  # this recording appends to the open editor
+        self._review_produced = ""
         self._last_output     = ""   # last text we pasted (for Edit & Train)
 
         # Overlay (AppKit panel — created lazily on main thread)
@@ -377,31 +380,29 @@ class WhisperLocal(rumps.App):
     def _show_training(self, _):
         s = trainer.stats()
         bar = trainer.progress_bar(s["progress"], 16)
+        curve = trainer.sparkline(trainer.accuracy_curve())
         mb = trainer.corpus_bytes() / (1024 * 1024)
         body = (
             f"🎙  Voice Level {s['level']}\n\n"
-            f"{bar}\n"
-            f"{s['into_level']} / {trainer.SAMPLES_PER_LEVEL} dictations to your next voice update\n\n"
-            f"Total dictations learned:  {s['samples']}\n"
-            f"Words dictated:            {s['words']}\n"
-            f"Corrections you've made:   {s['corrections']}\n"
-            f"Voice data stored:         {mb:.0f} MB\n\n"
-            "Every dictation teaches the model your voice. At each level it can "
-            "retrain to hear you more accurately."
+            f"{bar}   {s['into_level']}/{trainer.SAMPLES_PER_LEVEL} to next level\n\n"
+            f"Accuracy:        {s['accuracy']}%   (you edit {s['edit_rate']}% of dictations)\n"
+            f"Accuracy trend:  {curve or '—'}\n\n"
+            f"Dictations:      {s['dictations']}\n"
+            f"Training samples:{s['train_samples']}  (only your edited ones)\n"
+            f"Voice data:      {mb:.0f} MB\n\n"
+            "Review mode logs how often you edit — the less you edit over time, "
+            "the better it has learned your voice. Edited dictations become "
+            "training data for the next voice update."
         )
-        ready = s.get("ready_to_train") and s["samples"] > 0
-        rumps.alert(
-            title="Voice Training",
-            message=body,
-            ok=("Train now" if ready else "OK"),
-        )
+        ready = s.get("ready_to_train")
+        rumps.alert(title="Voice Training", message=body,
+                    ok=("Train now" if ready else "OK"))
 
     def _personalize_status(self) -> str:
         try:
             s = trainer.stats()
             bar = trainer.progress_bar(s["progress"])
-            return (f"  🎙 Voice Lv {s['level']}  {bar}  "
-                    f"{s['into_level']}/{trainer.SAMPLES_PER_LEVEL} to next update")
+            return f"  🎙 Voice Lv {s['level']}  {bar}  {s['accuracy']}% accurate"
         except Exception:
             return "  🎙 Voice Lv 0"
 
@@ -702,7 +703,9 @@ class WhisperLocal(rumps.App):
         self._committed_samples = 0
         self._prev_words        = []
         self._paused            = False
-        self._target_element, self._target_app = self._snapshot_focus()
+        self._append_mode       = self._editing   # if editor open, this take appends
+        if not self._editing:
+            self._target_element, self._target_app = self._snapshot_focus()
         self.recording    = True
         self.audio_chunks = []
         WAVEFORM_WINDOW.extend([0.02] * WAVEFORM_BINS)
@@ -911,6 +914,12 @@ class WhisperLocal(rumps.App):
             if not final:
                 return
 
+            # Append mode: this take adds to the open review editor, no paste.
+            if self._append_mode:
+                self._overlay.hide_async()
+                AppHelper.callAfter(self._editor.appendText_, final)
+                return
+
             # Optional LLM cleanup pass (failures fall back to raw text)
             if self.cfg.get("llm_cleanup", False):
                 self._overlay.push_text(final)
@@ -944,41 +953,49 @@ class WhisperLocal(rumps.App):
 
     def _present_review(self, final):
         """Show the editable confirm field (main thread)."""
+        self._review_produced = final           # what the model produced (for edit detection)
+        self._editing = True
         self._editor._on_submit = self._on_review_submit
         self._editor._on_cancel = self._on_review_cancel
         self._editor.presentText_(final)
 
     def _on_review_submit(self, edited):
         final = (edited or "").strip()
+        self._editing = False
         self._set_state("idle")
         if not final:
             return
-        # We're on the main thread here → safe to re-activate the target app
+
+        produced = (self._review_produced or "").strip()
+        was_edited = trainer.record_outcome(produced, final)   # logs accuracy metric
+
+        # Only edited dictations are useful training data — save just those.
+        if was_edited and self.cfg.get("personalize", True):
+            try:
+                trainer.save_sample(self._review_audio, SAMPLE_RATE, final)
+            except Exception as e:
+                print(f"Sample save error: {e}")
+        self._refresh_personalize_status()
+
+        # Re-activate the target app (main thread → safe) then paste
         try:
             if self._target_app:
-                self._target_app.activateWithOptions_(1 << 1)  # ignoring other apps
+                self._target_app.activateWithOptions_(1 << 1)
         except Exception as e:
             print(f"reactivate error: {e}")
         self._commit_final(final, play=True, paste_delay=0.3)
 
     def _on_review_cancel(self):
+        self._editing = False
         self._set_state("idle")
 
     def _commit_final(self, final, play=True, paste_delay=0.0):
-        """Paste, store history, bank training sample. Used by both paths."""
+        """Paste + store history. (Training data is saved separately, only on edit.)"""
         final = final.strip()
         if not final:
             return
         self._add_history(final)
         self._last_output = final
-
-        # Bank verified (audio → text) sample
-        if self.cfg.get("personalize", True):
-            try:
-                trainer.save_sample(self._review_audio, SAMPLE_RATE, final)
-                self._refresh_personalize_status()
-            except Exception as e:
-                print(f"Sample save error: {e}")
 
         # Paste (optionally after a beat so focus has returned to the target app)
         if paste_delay > 0:

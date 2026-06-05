@@ -16,7 +16,56 @@ import numpy as np
 DIR          = Path.home() / ".whisperlocal"
 PAIRS_PATH   = DIR / "corrections.jsonl"
 LEARNED_PATH = DIR / "learned.json"
+METRICS_PATH = DIR / "metrics.jsonl"   # per-dictation outcome (edited?, similarity)
 PROMOTE_AFTER = 2          # a replacement becomes a standing correction after N sightings
+
+
+def record_outcome(produced: str, final: str) -> bool:
+    """Log one dictation outcome. Returns True if the user edited it.
+    The edit rate over time is our accuracy metric (less editing = better)."""
+    produced = (produced or "").strip()
+    final = (final or "").strip()
+    ratio = difflib.SequenceMatcher(a=produced, b=final).ratio() if produced or final else 1.0
+    edited = produced != final
+    DIR.mkdir(parents=True, exist_ok=True)
+    with METRICS_PATH.open("a") as f:
+        f.write(json.dumps({"edited": edited, "ratio": round(ratio, 4)}) + "\n")
+    return edited
+
+
+def _metric_rows():
+    try:
+        return [json.loads(l) for l in METRICS_PATH.read_text().splitlines() if l.strip()]
+    except Exception:
+        return []
+
+
+def accuracy_pct(n: int = 30) -> int:
+    """Recent accuracy = average similarity between produced and confirmed text."""
+    rows = _metric_rows()[-n:]
+    if not rows:
+        return 100
+    return int(round(100 * sum(r.get("ratio", 1.0) for r in rows) / len(rows)))
+
+
+def edit_rate_pct(n: int = 30) -> int:
+    rows = _metric_rows()[-n:]
+    if not rows:
+        return 0
+    return int(round(100 * sum(1 for r in rows if r.get("edited")) / len(rows)))
+
+
+def accuracy_curve(buckets: int = 8):
+    """Average accuracy per time-bucket, oldest→newest, for the graph."""
+    rows = _metric_rows()
+    if not rows:
+        return []
+    size = max(1, len(rows) // buckets)
+    out = []
+    for i in range(0, len(rows), size):
+        chunk = rows[i:i + size]
+        out.append(int(round(100 * sum(r.get("ratio", 1.0) for r in chunk) / len(chunk))))
+    return out[-buckets:]
 
 # --- Ambient training corpus (audio → text pairs for future fine-tuning) ----
 TRAIN_DIR    = DIR / "training"
@@ -66,32 +115,45 @@ SAMPLES_PER_LEVEL = 50      # verified dictations per training milestone
 
 
 def stats() -> dict:
-    """Progress info for the gamified 'voice model' display."""
-    rows = _manifest_rows()
-    total = len(rows)
-    verified = sum(1 for r in rows if r.get("corrected") or True)  # all confirmed count
-    words = sum(len(r.get("text", "").split()) for r in rows)
-    corrections = sum(1 for r in rows if r.get("corrected"))
+    """Progress info for the gamified 'voice model' display.
+    XP/level comes from total dictations (engagement); training samples are
+    only the edited ones; accuracy comes from the edit-rate metric."""
+    metrics = _metric_rows()
+    total_dictations = len(metrics)
+    train_samples = len(_manifest_rows())   # only edited dictations are saved
 
-    level = total // SAMPLES_PER_LEVEL
-    into_level = total % SAMPLES_PER_LEVEL
-    to_next = SAMPLES_PER_LEVEL - into_level
-    progress = into_level / SAMPLES_PER_LEVEL
+    level = total_dictations // SAMPLES_PER_LEVEL
+    into_level = total_dictations % SAMPLES_PER_LEVEL
+    progress = into_level / SAMPLES_PER_LEVEL if SAMPLES_PER_LEVEL else 0
     return {
-        "samples": total,
-        "words": words,
-        "corrections": corrections,
+        "dictations": total_dictations,
+        "train_samples": train_samples,
+        "accuracy": accuracy_pct(),
+        "edit_rate": edit_rate_pct(),
         "level": level,
         "into_level": into_level,
-        "to_next": to_next,
+        "to_next": SAMPLES_PER_LEVEL - into_level,
         "progress": progress,
-        "ready_to_train": into_level == 0 and total > 0,
+        "ready_to_train": into_level == 0 and total_dictations > 0 and train_samples > 0,
     }
 
 
 def progress_bar(progress: float, width: int = 10) -> str:
     filled = int(round(progress * width))
     return "▓" * filled + "░" * (width - filled)
+
+
+_SPARK = "▁▂▃▄▅▆▇█"
+
+def sparkline(values, lo=70, hi=100) -> str:
+    """Render a list of 0-100 values as a unicode sparkline (clamped to lo..hi)."""
+    if not values:
+        return ""
+    out = []
+    for v in values:
+        t = (max(lo, min(hi, v)) - lo) / max(1, (hi - lo))
+        out.append(_SPARK[min(len(_SPARK) - 1, int(t * (len(_SPARK) - 1)))])
+    return "".join(out)
 
 
 def corpus_bytes() -> int:

@@ -140,6 +140,21 @@ class ReviewEditor(NSObject):
         # Select all so the user can immediately retype if they want
         self._tv.setSelectedRange_((0, len(text or "")))
 
+    def appendText_(self, text):
+        """Append more dictated text to the editor and keep it focused."""
+        if not text:
+            return
+        cur = self._tv.string()
+        joined = (cur.rstrip() + " " + text.strip()).strip() if cur.strip() else text.strip()
+        self._tv.setString_(joined)
+        NSApplication.sharedApplication().activateIgnoringOtherApps_(True)
+        self._panel.makeKeyAndOrderFront_(None)
+        self._panel.makeFirstResponder_(self._tv)
+        self._tv.setSelectedRange_((len(joined), 0))   # cursor at end
+
+    def isVisible(self):
+        return self._panel is not None and self._panel.isVisible()
+
     def submit(self):
         txt = self._tv.string()
         self._panel.orderOut_(None)
