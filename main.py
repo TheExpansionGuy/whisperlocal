@@ -53,8 +53,8 @@ ICON_TRANSCRIBING = str(_RESOURCES / "assets" / "menubar_proc.png")
 WAVEFORM_BINS = 48
 WAVEFORM_WINDOW = collections.deque([0.02] * WAVEFORM_BINS, maxlen=WAVEFORM_BINS)
 
-CHUNK_INTERVAL  = 1.5   # transcribe a new chunk every N seconds while speaking
-CHUNK_SECS      = 3.0   # seconds of audio per chunk (overlap gives Whisper context)
+CHUNK_INTERVAL  = 1.2   # how often to re-transcribe the live tail
+SETTLE_MARGIN   = 1.0   # a segment is "settled" once it ends this many secs before the live edge
 MAX_RECORD_SECS = 300
 
 
@@ -94,9 +94,9 @@ class WhisperLocal(rumps.App):
         self._transcribing   = False
         self._target_element = None
         self._target_app     = None
-        self._model_ready    = False
-        self._accumulated    = ""    # transcript built up during recording
-        self._chunk_offset   = 0     # index into audio_chunks already transcribed
+        self._model_ready     = False
+        self._committed_text  = ""   # settled transcript, no longer re-transcribed
+        self._committed_samples = 0  # audio samples already finalized
 
         # Overlay (AppKit panel — created lazily on main thread)
         from overlay import OverlayPanel
@@ -333,9 +333,13 @@ class WhisperLocal(rumps.App):
         self._set_state("idle")
 
     def _run_transcription(self, audio: np.ndarray, prompt: str = "") -> str:
-        """Send audio (+ optional context prompt) to persistent worker, return text."""
+        """Return plain text only."""
+        return self._run_transcription_full(audio, prompt).get("text", "")
+
+    def _run_transcription_full(self, audio: np.ndarray, prompt: str = "") -> dict:
+        """Send audio to worker, return {'text', 'segments'}."""
         if not hasattr(self, "_worker") or self._worker.poll() is not None:
-            return ""
+            return {"text": "", "segments": []}
         try:
             data = audio.tobytes()
             header = json.dumps({"n": len(data), "prompt": prompt[-200:]}).encode()
@@ -343,11 +347,11 @@ class WhisperLocal(rumps.App):
             self._worker.stdin.flush()
             line = self._worker.stdout.readline()
             if not line.strip():
-                return ""
-            return json.loads(line.strip()).get("text", "")
+                return {"text": "", "segments": []}
+            return json.loads(line.strip())
         except Exception as e:
             print(f"Transcription error: {e}")
-            return ""
+            return {"text": "", "segments": []}
 
     # ------------------------------------------------------------------
     # Hotkey listener
@@ -394,9 +398,9 @@ class WhisperLocal(rumps.App):
             return
         if not self._is_hotkey(key) or self.recording or not self._model_ready:
             return
-        self._cancelled    = False
-        self._accumulated  = ""
-        self._chunk_offset = 0
+        self._cancelled         = False
+        self._committed_text    = ""
+        self._committed_samples = 0
         self._target_element, self._target_app = self._snapshot_focus()
         self.recording    = True
         self.audio_chunks = []
@@ -499,41 +503,63 @@ class WhisperLocal(rumps.App):
         self._partial_timer.start()
 
     def _process_chunk(self):
-        """Re-transcribe ALL audio so far and REPLACE the live text (no append, no prompt).
-        This avoids Whisper repetition/echo that plagues chunk-and-append streaming."""
+        """Re-transcribe only the unsettled tail. Commit segments that have stopped moving,
+        so we never reprocess settled audio — fast, and no repetition."""
         if not self._model_lock.acquire(blocking=False):
             return  # a transcription is already in flight; skip this tick
         try:
             if not self.audio_chunks:
                 return
             audio = np.concatenate(self.audio_chunks).flatten()
-            if len(audio) < int(SAMPLE_RATE * 0.6):
+            tail = audio[self._committed_samples:]
+            tail_dur = len(tail) / SAMPLE_RATE
+            if tail_dur < 0.6:
                 return
-            text = self._run_transcription(audio)
-            if text and text != self._accumulated:
-                self._accumulated = text
-                self._overlay.push_text(text)
+
+            result = self._run_transcription_full(tail, self._committed_text)
+            segs = result.get("segments", [])
+
+            # Commit segments that end safely before the live edge
+            commit_until = 0.0
+            committed_now = []
+            unsettled = []
+            for seg in segs:
+                if seg["end"] <= tail_dur - SETTLE_MARGIN:
+                    committed_now.append(seg["text"])
+                    commit_until = seg["end"]
+                else:
+                    unsettled.append(seg["text"])
+
+            if committed_now:
+                self._committed_text = (
+                    self._committed_text + " " + " ".join(committed_now)).strip()
+                self._committed_samples += int(commit_until * SAMPLE_RATE)
+
+            # Live display = committed text + still-settling tail
+            display = (self._committed_text + " " + " ".join(unsettled)).strip()
+            if display:
+                self._overlay.push_text(display)
         except Exception as e:
             print(f"Chunk error: {e}")
         finally:
             self._model_lock.release()
 
     def _transcribe_final(self):
-        """On release: one final full-audio pass, then paste."""
+        """On release: transcribe just the remaining tail, append to committed text, paste."""
         try:
             if self._cancelled:
                 return
             with self._model_lock:
-                if not self.audio_chunks:
-                    return
-                audio = np.concatenate(self.audio_chunks).flatten()
-                if len(audio) < int(SAMPLE_RATE * 0.3):
-                    return
-                text = self._run_transcription(audio)
-                if text:
-                    self._accumulated = text
+                final = self._committed_text
+                if self.audio_chunks:
+                    audio = np.concatenate(self.audio_chunks).flatten()
+                    tail = audio[self._committed_samples:]
+                    if len(tail) >= int(SAMPLE_RATE * 0.2):
+                        text = self._run_transcription(tail, self._committed_text)
+                        if text:
+                            final = (self._committed_text + " " + text).strip()
 
-            final = self._accumulated.strip()
+            final = final.strip()
             if self.cfg["filler_removal"]:
                 final = FILLER_RE.sub("", final).strip()
             if not final:

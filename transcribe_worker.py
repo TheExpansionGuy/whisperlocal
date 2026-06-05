@@ -52,7 +52,13 @@ def main():
 
             result = mlx_whisper.transcribe(audio, **kwargs)
             text   = result.get("text", "").strip()
-            sys.stdout.write(json.dumps({"text": text}) + "\n")
+            segs   = [
+                {"start": s.get("start", 0.0),
+                 "end":   s.get("end", 0.0),
+                 "text":  s.get("text", "").strip()}
+                for s in result.get("segments", [])
+            ]
+            sys.stdout.write(json.dumps({"text": text, "segments": segs}) + "\n")
             sys.stdout.flush()
         except Exception as e:
             sys.stdout.write(json.dumps({"text": ""}) + "\n")
