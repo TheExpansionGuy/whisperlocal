@@ -143,10 +143,8 @@ class ReviewEditor(NSObject):
     def submit(self):
         txt = self._tv.string()
         self._panel.orderOut_(None)
-        # Hand focus back to the previously-active app before pasting
-        NSApplication.sharedApplication().deactivate()
         if self._on_submit:
-            self._on_submit(txt)
+            self._on_submit(txt)   # caller re-activates target app + pastes
 
     def cancel(self):
         self._panel.orderOut_(None)

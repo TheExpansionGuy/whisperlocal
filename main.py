@@ -927,18 +927,24 @@ class WhisperLocal(rumps.App):
     def _on_review_submit(self, edited):
         final = (edited or "").strip()
         self._set_state("idle")
-        if final:
-            self._commit_final(final, play=True)
+        if not final:
+            return
+        # We're on the main thread here → safe to re-activate the target app
+        try:
+            if self._target_app:
+                self._target_app.activateWithOptions_(1 << 1)  # ignoring other apps
+        except Exception as e:
+            print(f"reactivate error: {e}")
+        self._commit_final(final, play=True, paste_delay=0.3)
 
     def _on_review_cancel(self):
         self._set_state("idle")
 
-    def _commit_final(self, final, play=True):
+    def _commit_final(self, final, play=True, paste_delay=0.0):
         """Paste, store history, bank training sample. Used by both paths."""
         final = final.strip()
         if not final:
             return
-        self._overlay.push_text(final)
         self._add_history(final)
         self._last_output = final
 
@@ -950,8 +956,11 @@ class WhisperLocal(rumps.App):
             except Exception as e:
                 print(f"Sample save error: {e}")
 
-        # Paste after a beat so focus has returned from any editor panel
-        threading.Timer(0.18, lambda: self._paste(final + " ")).start()
+        # Paste (optionally after a beat so focus has returned to the target app)
+        if paste_delay > 0:
+            threading.Timer(paste_delay, lambda: self._paste(final + " ")).start()
+        else:
+            self._paste(final + " ")
         if play:
             self._play_sound("Pop")
 
