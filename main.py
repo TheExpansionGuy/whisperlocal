@@ -255,6 +255,8 @@ class WhisperLocal(rumps.App):
                     cpu += float(parts[0])
                     rss += int(parts[1])
             self._power_item.title = f"⚡ CPU {cpu:.0f}%   RAM {rss/1024:.0f}MB"
+            if hasattr(self, "_overlay"):
+                self._overlay.push_power(f"{cpu:.0f}%")
         except Exception:
             pass
 

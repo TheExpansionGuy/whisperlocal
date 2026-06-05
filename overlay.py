@@ -45,7 +45,7 @@ RING    = _c(1.00, 1.00, 1.00, 0.10)
 
 PAD   = 16
 IND_W = 20
-TMR_W = 42
+TMR_W = 92   # holds timer + live CPU%
 LBL_W = 76
 
 def _layout(w):
@@ -372,40 +372,40 @@ class _PillCanvas(NSView):
             active = True
 
         xs  = [rect.origin.x + i * w / (n - 1) for i in range(n)]
-        amp = h / 2 * 0.9
+        amp = h / 2 * 0.85
 
-        # Three translucent ribbons, all roughly full-height but each with a
-        # slightly different travelling phase. Where they overlap the blue
-        # deepens, so they read as ONE living blue ribbon, not separate bands.
+        # Edge taper so lines converge to the centre at both ends
+        taper = 5
+        env = list(base)
+        for i in range(taper):
+            t = i / taper
+            env[i] *= t
+            env[-(i + 1)] *= t
+
+        # Three overlapping stroked lines, each oscillating around the centre
+        # with a different travelling phase — reads as moving lines, not a solid.
         if active:
-            ribbons = [
-                (_c(0.42, 0.78, 1.00, 0.40), 0.0,  1.00),
-                (_c(0.40, 0.72, 1.00, 0.35), 2.1,  0.92),
-                (_c(0.55, 0.68, 1.00, 0.30), 4.2,  0.86),
+            lines = [
+                (_c(0.42, 0.78, 1.00, 0.95), 0.0, 1.5),
+                (_c(0.40, 0.72, 1.00, 0.60), 2.1, 1.3),
+                (_c(0.60, 0.66, 1.00, 0.45), 4.2, 1.1),
             ]
         else:
-            ribbons = [
-                (_c(0.50, 0.50, 0.54, 0.45), 0.0, 1.00),
-                (_c(0.50, 0.50, 0.54, 0.30), 2.5, 0.9),
+            lines = [
+                (_c(0.52, 0.52, 0.56, 0.85), 0.0, 1.3),
+                (_c(0.52, 0.52, 0.56, 0.45), 2.5, 1.1),
             ]
 
-        for color, shift, scale in ribbons:
-            levels = []
+        speed = 1.3 if active else 0.5
+        for color, shift, lw in lines:
+            pts = []
             for i in range(n):
-                wob = 1.0 + (0.22 * math.sin(self._phase * 2 * math.pi * 1.3 + i * 0.45 + shift)
-                             if active else 0.10 * math.sin(self._phase * 2 * math.pi + i * 0.4 + shift))
-                levels.append(base[i] * scale * wob)
-            # taper edges to zero for a smooth fade
-            taper = 5
-            for i in range(taper):
-                t = i / taper
-                levels[i] *= t
-                levels[-(i + 1)] *= t
-
-            top = [(xs[i], cy - levels[i] * amp) for i in range(n)]
-            bot = [(xs[i], cy + levels[i] * amp) for i in range(n - 1, -1, -1)]
-            color.setFill()
-            p = _catmull(top); _catmull_ext(p, bot); p.closePath(); p.fill()
+                osc = math.sin(self._phase * 2 * math.pi * speed + i * 0.5 + shift)
+                pts.append((xs[i], cy + amp * env[i] * osc))
+            path = _catmull(pts)   # open smooth curve (no fill)
+            color.setStroke()
+            path.setLineWidth_(lw)
+            path.stroke()
 
 
 def _catmull(pts):
@@ -444,6 +444,7 @@ class OverlayPanel(NSObject):
         self._record_start = 0.0
         self._state        = "idle"
         self._transcript   = ""
+        self._power        = ""
         return self
 
     def _setup(self):
@@ -514,10 +515,17 @@ class OverlayPanel(NSObject):
 
     def animTick_(self, _):
         self._anim_phase = (self._anim_phase + 1.0/FPS) % 1.0
-        if self._canvas: self._canvas.setPhase_(self._anim_phase)
-        if self._state == "recording" and self._canvas:
+        if not self._canvas:
+            return
+        self._canvas.setPhase_(self._anim_phase)
+        # Right-side text: timer while recording + live CPU% always
+        parts = []
+        if self._state == "recording":
             e = time.time() - self._record_start
-            self._canvas.setTimer_(f"{int(e//60)}:{int(e%60):02d}")
+            parts.append(f"{int(e//60)}:{int(e%60):02d}")
+        if self._power:
+            parts.append(self._power)
+        self._canvas.setTimer_("  ".join(parts))
 
     # -- main thread selectors ------------------------------------------
 
@@ -559,8 +567,13 @@ class OverlayPanel(NSObject):
         self._transcript = text
         self._updateLayout()
 
+    def setPowerObj_(self, p):
+        self._power = p or ""
+
     # -- thread-safe wrappers ------------------------------------------
 
+    def push_power(self, p):
+        self.performSelectorOnMainThread_withObject_waitUntilDone_("setPowerObj:", p, False)
     def push_state(self, s):
         self.performSelectorOnMainThread_withObject_waitUntilDone_("setStateObj:", s, False)
     def push_levels(self, lvl):
