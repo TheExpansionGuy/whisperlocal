@@ -14,6 +14,7 @@ import pyperclip
 import rumps
 import sounddevice as sd
 from AppKit import NSEvent
+from PyObjCTools import AppHelper
 from pynput import keyboard
 
 # ---------------------------------------------------------------------------
@@ -270,7 +271,14 @@ class WhisperLocal(rumps.App):
 
     def _set_state(self, state: str):
         icons = {"idle": ICON_IDLE, "recording": ICON_RECORDING, "transcribing": ICON_TRANSCRIBING}
-        self.icon = icons.get(state, ICON_IDLE)
+        icon = icons.get(state, ICON_IDLE)
+        # Always set the status-bar icon on the main thread (AppKit isn't thread-safe)
+        AppHelper.callAfter(lambda: setattr(self, "icon", icon))
+
+    def _set_status(self, text: str):
+        """Set the menu status line on the main thread."""
+        if hasattr(self, "_status_item"):
+            AppHelper.callAfter(lambda: setattr(self._status_item, "title", text))
 
     def _venv_python(self) -> str:
         if getattr(sys, "frozen", False):
@@ -305,21 +313,18 @@ class WhisperLocal(rumps.App):
                 stderr=subprocess.PIPE,
                 env=self._worker_env(),
             )
-            self._worker.stdout._sock if hasattr(self._worker.stdout, '_sock') else None
             line = self._worker.stdout.readline().strip()
             if line == b"READY":
                 self._model_ready = True
                 model_short = self.cfg["model"].split("/")[-1]
-                if hasattr(self, "_status_item"):
-                    self._status_item.title = f"MLX ✅  {model_short} — hold ⌥"
+                self._set_status(f"MLX ✅  {model_short} — hold ⌥")
             elif line.startswith(b"ERROR:"):
                 raise RuntimeError(line.decode())
             else:
                 raise RuntimeError(f"Unexpected: {line[:80]}")
         except Exception as e:
             print(f"Worker start error: {e}")
-            if hasattr(self, "_status_item"):
-                self._status_item.title = f"MLX ❌ {str(e)[:60]}"
+            self._set_status(f"MLX ❌ {str(e)[:60]}")
         self._set_state("idle")
 
     def _run_transcription(self, audio: np.ndarray, prompt: str = "") -> str:
@@ -371,9 +376,8 @@ class WhisperLocal(rumps.App):
         NSEvent.addGlobalMonitorForEventsMatchingMask_handler_(
             NSKeyDownMask, key_handler)
 
-        if hasattr(self, "_status_item"):
-            ready = "hold ⌥ to dictate" if self._model_ready else "loading model…"
-            self._status_item.title = f"Listener: ✅ active — {ready}"
+        ready = "hold ⌥ to dictate" if self._model_ready else "loading model…"
+        self._set_status(f"Listener: ✅ active — {ready}")
 
     def _on_press(self, key):
         # Called from NSEvent monitor (main thread) or pynput fallback
