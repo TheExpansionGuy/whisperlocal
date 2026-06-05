@@ -680,10 +680,26 @@ class WhisperLocal(rumps.App):
             if event.keyCode() == 53:
                 self._on_press(keyboard.Key.esc)
 
+        # Global monitors fire for OTHER apps; local monitors fire when OUR app
+        # is active (e.g. while the review editor is open) — need both so you can
+        # hold ⌥ to append more speech while editing.
         NSEvent.addGlobalMonitorForEventsMatchingMask_handler_(
             NSFlagsChangedMask, flags_handler)
         NSEvent.addGlobalMonitorForEventsMatchingMask_handler_(
             NSKeyDownMask, key_handler)
+
+        def local_flags(event):
+            flags_handler(event)
+            return event
+
+        def local_key(event):
+            key_handler(event)
+            return event
+
+        NSEvent.addLocalMonitorForEventsMatchingMask_handler_(
+            NSFlagsChangedMask, local_flags)
+        NSEvent.addLocalMonitorForEventsMatchingMask_handler_(
+            NSKeyDownMask, local_key)
 
         ready = "hold ⌥ to dictate" if self._model_ready else "loading model…"
         self._set_status(f"Listener: ✅ active — {ready}")
