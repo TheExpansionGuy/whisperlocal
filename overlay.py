@@ -261,12 +261,12 @@ class _PillCanvas(NSView):
             for word, alpha, settled, wdt in line:
                 if settled:
                     col = NSColor.colorWithRed_green_blue_alpha_(0.94, 0.94, 0.96, alpha)
-                    font = _FONT_TX
                 else:
+                    # Same font as committed (keeps box balanced) — distinguish
+                    # settling words by a dim, gently pulsing blue instead of italic.
                     col = NSColor.colorWithRed_green_blue_alpha_(
                         0.70, 0.82, 1.0, alpha * shimmer)
-                    font = _FONT_TX_SETTLING
-                attrs = {NSFontAttributeName: font,
+                attrs = {NSFontAttributeName: _FONT_TX,
                          NSForegroundColorAttributeName: col,
                          NSParagraphStyleAttributeName: _para(NSTextAlignmentLeft)}
                 NSString.stringWithString_(word + " ").drawAtPoint_withAttributes_(
