@@ -115,7 +115,7 @@ class ReviewEditor(NSObject):
         self._tv = tv
         self._panel = panel
 
-    def present_text_onSubmit_onCancel_(self, text, on_submit, on_cancel):
+    def presentText_onSubmit_onCancel_(self, text, on_submit, on_cancel):
         if self._panel is None:
             self._setup()
         self._on_submit = on_submit
