@@ -78,6 +78,24 @@ def _norm_word(w: str) -> str:
     return re.sub(r"[^\w']", "", w).lower()
 
 
+# Custom corrections for terms Whisper consistently mis-hears.
+# Keys are matched case-insensitively as whole phrases.
+CORRECTIONS = {
+    "q a n": "Qwen",
+    "quen": "Qwen",
+    "mlx": "MLX",
+    "whisper local": "WhisperLocal",
+    "claude": "Claude",
+    "github": "GitHub",
+}
+
+
+def _apply_corrections(text: str) -> str:
+    for wrong, right in CORRECTIONS.items():
+        text = re.sub(rf"\b{re.escape(wrong)}\b", right, text, flags=re.IGNORECASE)
+    return text
+
+
 def _common_prefix_len(a, b) -> int:
     """Length of the longest matching prefix of two normalized word lists."""
     n = 0
@@ -600,6 +618,15 @@ class WhisperLocal(rumps.App):
             while agree > 0 and words[agree - 1]["end"] > tail_dur - SETTLE_MARGIN:
                 agree -= 1
 
+            # Safeguard: if the tail has grown too long (continuous speech where
+            # passes never agree), force-commit everything older than SETTLE_MARGIN
+            # so the tail stays short and passes stay fast (prevents the stall).
+            if tail_dur > MAX_TAIL_SECS:
+                forced = agree
+                while forced < len(words) and words[forced]["end"] <= tail_dur - SETTLE_MARGIN:
+                    forced += 1
+                agree = max(agree, forced)
+
             if agree > 0:
                 committed = " ".join(wd["w"] for wd in words[:agree]).strip()
                 self._committed_text = _collapse_repeats(
@@ -622,36 +649,48 @@ class WhisperLocal(rumps.App):
             self._model_lock.release()
 
     def _transcribe_final(self):
-        """On release: transcribe just the remaining tail, append to committed text, paste."""
+        """On release: transcribe the remaining tail, append, optionally clean up, paste.
+        Paste is bulletproof — any error in transcription/cleanup still pastes what we have."""
         try:
             if self._cancelled:
                 return
-            with self._model_lock:
-                final = self._committed_text
-                if self.audio_chunks:
-                    audio = np.concatenate(self.audio_chunks).flatten()
-                    tail = audio[self._committed_samples:]
-                    if len(tail) >= int(SAMPLE_RATE * 0.2):
-                        text = self._run_transcription(tail, self._committed_text)
-                        if text:
-                            final = (self._committed_text + " " + text).strip()
+
+            # Start from committed text; try to transcribe the small remaining tail.
+            final = self._committed_text
+            try:
+                with self._model_lock:
+                    if self.audio_chunks:
+                        audio = np.concatenate(self.audio_chunks).flatten()
+                        tail = audio[self._committed_samples:]
+                        if len(tail) >= int(SAMPLE_RATE * 0.2):
+                            text = self._run_transcription(tail, self._committed_text)
+                            if text:
+                                final = (self._committed_text + " " + text).strip()
+            except Exception as e:
+                print(f"Final transcription error (using committed text): {e}")
 
             final = _collapse_repeats(final.strip())
+            final = _apply_corrections(final)
             if self.cfg["filler_removal"]:
                 final = FILLER_RE.sub("", final).strip()
             if not final:
                 return
 
-            # Optional LLM cleanup pass
+            # Optional LLM cleanup pass (failures fall back to raw text)
             if self.cfg.get("llm_cleanup", False):
-                self._overlay.push_text(final + "  ✨")
-                cleaned = self._run_cleanup(final)
-                if cleaned:
-                    final = cleaned
+                self._overlay.push_state("transcribing")  # keep the dots, no emoji
+                try:
+                    cleaned = self._run_cleanup(final)
+                    if cleaned:
+                        final = cleaned
+                except Exception as e:
+                    print(f"Cleanup failed, pasting raw: {e}")
 
             self._overlay.push_text(final)
             self._add_history(final)
-            self._paste(final)
+            self._paste(final + " ")   # trailing space so consecutive dictations don't collide
+        except Exception as e:
+            print(f"Final paste error: {e}")
         finally:
             self._transcribing = False
             self._overlay.push_state("idle")
