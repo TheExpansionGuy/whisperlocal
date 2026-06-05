@@ -33,7 +33,8 @@ from pynput import keyboard
 
 CONFIG_PATH = Path.home() / ".whisperlocal" / "config.json"
 DEFAULTS = {"model": "mlx-community/whisper-small.en-mlx", "filler_removal": True,
-            "llm_cleanup": False, "low_power": False, "sounds": True, "history": []}
+            "llm_cleanup": False, "low_power": False, "sounds": True,
+            "personalize": True, "history": []}
 
 LOW_POWER_MODEL = "mlx-community/whisper-base.en-mlx"  # lighter model when low-power on
 HISTORY_MAX = 10
@@ -259,6 +260,13 @@ class WhisperLocal(rumps.App):
 
         self.menu.add(rumps.MenuItem("Edit Last & Train…", callback=self._edit_and_train))
 
+        pers_item = rumps.MenuItem("Personalize (learn my voice)", callback=self._toggle_personalize)
+        pers_item.state = int(self.cfg.get("personalize", True))
+        self.menu.add(pers_item)
+        self._pers_status = rumps.MenuItem(self._personalize_status())
+        self._pers_status.set_callback(None)
+        self.menu.add(self._pers_status)
+
         self.menu.add(rumps.separator)
         self.menu.add(rumps.MenuItem("Check Accessibility…", callback=self._open_accessibility))
         self._status_item = rumps.MenuItem("Listener: starting…")
@@ -347,6 +355,25 @@ class WhisperLocal(rumps.App):
         self._model_ready = False
         threading.Thread(target=self._load_model, daemon=True).start()
 
+    def _toggle_personalize(self, sender):
+        self.cfg["personalize"] = not self.cfg.get("personalize", True)
+        sender.state = int(self.cfg["personalize"])
+        save_config(self.cfg)
+        self._refresh_personalize_status()
+
+    def _personalize_status(self) -> str:
+        try:
+            n = trainer.sample_count()
+            mb = trainer.corpus_bytes() / (1024 * 1024)
+            return f"  Learned from {n} dictations ({mb:.0f} MB)"
+        except Exception:
+            return "  Learned from 0 dictations"
+
+    def _refresh_personalize_status(self):
+        if hasattr(self, "_pers_status"):
+            AppHelper.callAfter(
+                lambda: setattr(self._pers_status, "title", self._personalize_status()))
+
     def _toggle_sounds(self, sender):
         self.cfg["sounds"] = not self.cfg.get("sounds", True)
         sender.state = int(self.cfg["sounds"])
@@ -372,6 +399,11 @@ class WhisperLocal(rumps.App):
             return
         edited = resp.text.strip()
         n_new = trainer.record_correction(produced, edited)
+        if edited and edited != produced:
+            try:
+                trainer.update_last_text(edited)  # relabel the banked audio sample
+            except Exception:
+                pass
         self._last_output = edited
         if edited and edited != produced:
             rumps.notification(
@@ -858,6 +890,16 @@ class WhisperLocal(rumps.App):
             self._add_history(final)
             self._last_output = final
             self._paste(final + " ")   # trailing space so consecutive dictations don't collide
+
+            # Ambient personalization: bank (audio → text) for future fine-tuning
+            if self.cfg.get("personalize", True):
+                try:
+                    full_audio = np.concatenate(self.audio_chunks).flatten() \
+                        if self.audio_chunks else None
+                    trainer.save_sample(full_audio, SAMPLE_RATE, final)
+                    self._refresh_personalize_status()
+                except Exception as e:
+                    print(f"Sample save error: {e}")
             # Satisfying completion flourish — green check + soft chime
             self._overlay.push_state("done")
             self._play_sound("Pop")   # subtle completion tap

@@ -7,13 +7,96 @@ Captures (what the app produced) → (what the user corrected it to) pairs, and:
 """
 import json
 import re
+import wave
 import difflib
 from pathlib import Path
+
+import numpy as np
 
 DIR          = Path.home() / ".whisperlocal"
 PAIRS_PATH   = DIR / "corrections.jsonl"
 LEARNED_PATH = DIR / "learned.json"
 PROMOTE_AFTER = 2          # a replacement becomes a standing correction after N sightings
+
+# --- Ambient training corpus (audio → text pairs for future fine-tuning) ----
+TRAIN_DIR    = DIR / "training"
+MANIFEST     = TRAIN_DIR / "manifest.jsonl"
+MAX_SAMPLES  = 1000        # hard cap; oldest are pruned (~ up to a few hundred MB)
+
+
+def save_sample(audio_f32, sample_rate: int, text: str) -> int:
+    """Save one (audio, text) training sample as 16-bit WAV + manifest line.
+    Prunes oldest samples beyond MAX_SAMPLES. Returns total sample count."""
+    text = (text or "").strip()
+    if not text or audio_f32 is None or len(audio_f32) < sample_rate * 0.3:
+        return sample_count()
+    TRAIN_DIR.mkdir(parents=True, exist_ok=True)
+
+    # Stable, monotonic-ish id from existing count + content length
+    idx = _next_index()
+    name = f"s{idx:06d}.wav"
+    pcm = np.clip(np.asarray(audio_f32) * 32767.0, -32768, 32767).astype("<i2")
+    with wave.open(str(TRAIN_DIR / name), "wb") as w:
+        w.setnchannels(1); w.setsampwidth(2); w.setframerate(sample_rate)
+        w.writeframes(pcm.tobytes())
+
+    with MANIFEST.open("a") as f:
+        f.write(json.dumps({"audio": name, "text": text, "corrected": False}) + "\n")
+
+    _prune()
+    return sample_count()
+
+
+def update_last_text(corrected: str):
+    """Mark the most recent sample with the user's corrected text (better label)."""
+    rows = _manifest_rows()
+    if not rows:
+        return
+    rows[-1]["text"] = corrected.strip()
+    rows[-1]["corrected"] = True
+    MANIFEST.write_text("".join(json.dumps(r) + "\n" for r in rows))
+
+
+def sample_count() -> int:
+    return len(_manifest_rows())
+
+
+def corpus_bytes() -> int:
+    try:
+        return sum(p.stat().st_size for p in TRAIN_DIR.glob("*.wav"))
+    except Exception:
+        return 0
+
+
+def _manifest_rows():
+    try:
+        return [json.loads(l) for l in MANIFEST.read_text().splitlines() if l.strip()]
+    except Exception:
+        return []
+
+
+def _next_index() -> int:
+    rows = _manifest_rows()
+    if not rows:
+        return 0
+    try:
+        return int(rows[-1]["audio"][1:7]) + 1
+    except Exception:
+        return len(rows)
+
+
+def _prune():
+    rows = _manifest_rows()
+    if len(rows) <= MAX_SAMPLES:
+        return
+    drop = rows[:len(rows) - MAX_SAMPLES]
+    for r in drop:
+        try:
+            (TRAIN_DIR / r["audio"]).unlink()
+        except Exception:
+            pass
+    keep = rows[len(rows) - MAX_SAMPLES:]
+    MANIFEST.write_text("".join(json.dumps(r) + "\n" for r in keep))
 
 
 def _load_learned() -> dict:
