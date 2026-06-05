@@ -16,14 +16,16 @@ from Foundation import NSMakePoint, NSObject, NSTimer, NSString
 # ---------------------------------------------------------------------------
 # Layout
 # ---------------------------------------------------------------------------
-PANEL_W    = 600
-PILL_H     = 52
+PANEL_W_COMPACT = 380    # controls-only width (idle / recording, no text yet)
+PANEL_W_WIDE    = 560    # widened when showing transcript
+PANEL_W         = PANEL_W_WIDE   # max width (used to size the window once)
+PILL_H     = 46
 MAX_LINES  = 6
 LINE_H     = 20
 TX_PAD_V   = 12
 TX_PAD_H   = 24
 BOTTOM     = 64
-CORNER     = 26.0
+CORNER     = 23.0
 FPS        = 30
 
 _FLOAT   = 3
@@ -41,12 +43,19 @@ DIM     = _c(0.48, 0.48, 0.52, 1.0)
 DIVIDER = _c(1.00, 1.00, 1.00, 0.07)
 RING    = _c(1.00, 1.00, 1.00, 0.10)
 
-PAD   = 18
-IND_W = 22;  IND_X = PAD
-TMR_W = 46;  TMR_X = PANEL_W - PAD - TMR_W
-LBL_W = 84;  LBL_X = TMR_X - LBL_W - 6
-WAV_X = IND_X + IND_W + 12
-WAV_W = LBL_X - WAV_X - 8
+PAD   = 16
+IND_W = 20
+TMR_W = 42
+LBL_W = 76
+
+def _layout(w):
+    """Compute control-strip x-positions for a given panel width."""
+    ind_x = PAD
+    tmr_x = w - PAD - TMR_W
+    lbl_x = tmr_x - LBL_W - 4
+    wav_x = ind_x + IND_W + 10
+    wav_w = lbl_x - wav_x - 6
+    return ind_x, wav_x, wav_w, lbl_x, tmr_x
 
 # Animation constants
 MORPH_SPEED   = 2.5   # units/sec for state morph (0→1)
@@ -178,6 +187,8 @@ class _PillCanvas(NSView):
 
     def drawRect_(self, rect):
         total_h = rect.size.height
+        w = rect.size.width
+        ind_x, wav_x, wav_w, lbl_x, tmr_x = _layout(w)
 
         pill = NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
             rect, CORNER, CORNER)
@@ -187,7 +198,7 @@ class _PillCanvas(NSView):
         BG.setFill(); pill.fill()
 
         # Border ring
-        inset = NSMakeRect(0.5, 0.5, rect.size.width - 1, rect.size.height - 1)
+        inset = NSMakeRect(0.5, 0.5, w - 1, rect.size.height - 1)
         border = NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
             inset, CORNER - 0.5, CORNER - 0.5)
         border.setLineWidth_(1.0); RING.setStroke(); border.stroke()
@@ -196,28 +207,28 @@ class _PillCanvas(NSView):
         if total_h > PILL_H + 4:
             div = NSBezierPath.bezierPath()
             div.moveToPoint_(NSMakePoint(PAD, PILL_H))
-            div.lineToPoint_(NSMakePoint(rect.size.width - PAD, PILL_H))
+            div.lineToPoint_(NSMakePoint(w - PAD, PILL_H))
             div.setLineWidth_(0.5); DIVIDER.setStroke(); div.stroke()
-            self._draw_transcript(total_h)
+            self._draw_transcript(total_h, w)
 
         # Pill strip
-        self._draw_indicator(IND_X + IND_W / 2, PILL_H / 2)
-        self._draw_waveform(NSMakeRect(WAV_X, (PILL_H - 30) / 2, WAV_W, 30))
+        self._draw_indicator(ind_x + IND_W / 2, PILL_H / 2)
+        self._draw_waveform(NSMakeRect(wav_x, (PILL_H - 26) / 2, wav_w, 26))
 
         # Labels
         state_label = {"recording": "Listening",
                        "transcribing": "Transcribing"}.get(self._state, "")
         _draw_text(state_label, _ATTRS_STATE,
-                   _vcenter_rect(LBL_X, LBL_W, 16, 0, PILL_H))
+                   _vcenter_rect(lbl_x, LBL_W, 16, 0, PILL_H))
         _draw_text(self._timer_str, _ATTRS_TIMER,
-                   _vcenter_rect(TMR_X, TMR_W, 16, 0, PILL_H))
+                   _vcenter_rect(tmr_x, TMR_W, 16, 0, PILL_H))
 
-    def _draw_transcript(self, total_h):
+    def _draw_transcript(self, total_h, w):
         """Draw words top-to-bottom with per-word alpha fade-in."""
         if not self._word_alphas:
             return
 
-        max_w = PANEL_W - TX_PAD_H * 2
+        max_w = w - TX_PAD_H * 2
 
         # First pass: lay out words into lines
         lines = []      # list of [(word, alpha), ...]
@@ -410,10 +421,13 @@ class OverlayPanel(NSObject):
         if not self._panel: return
         words = self._transcript.strip().split() if self._transcript.strip() else []
 
+        # Compact width when no text; widen for transcript
+        panel_w = PANEL_W_WIDE if words else PANEL_W_COMPACT
+
         if not words:
             text_h = 0
         else:
-            chars = int((PANEL_W - TX_PAD_H * 2) / 7.8)
+            chars = int((panel_w - TX_PAD_H * 2) / 7.8)
             lines = 1; cur = 0
             for w in words:
                 if cur + len(w) + 1 > chars: lines += 1; cur = len(w)
@@ -422,17 +436,17 @@ class OverlayPanel(NSObject):
 
         total_h = PILL_H + text_h
         sf = NSScreen.mainScreen().frame()
-        x = (sf.size.width - PANEL_W) / 2 + sf.origin.x
+        x = (sf.size.width - panel_w) / 2 + sf.origin.x
         y = sf.origin.y + BOTTOM
-        new_frame = NSMakeRect(x, y, PANEL_W, total_h)
+        new_frame = NSMakeRect(x, y, panel_w, total_h)
 
-        # Animated resize
+        # Animated resize (width + height)
         NSAnimationContext.beginGrouping()
-        NSAnimationContext.currentContext().setDuration_(0.25)
+        NSAnimationContext.currentContext().setDuration_(0.22)
         self._panel.animator().setFrame_display_(new_frame, True)
         NSAnimationContext.endGrouping()
 
-        self._canvas.setFrame_(NSMakeRect(0, 0, PANEL_W, total_h))
+        self._canvas.setFrame_(NSMakeRect(0, 0, panel_w, total_h))
         if self._canvas:
             self._canvas.setWords_(words)
 
