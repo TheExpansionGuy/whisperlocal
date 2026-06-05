@@ -228,8 +228,35 @@ class WhisperLocal(rumps.App):
         self._status_item = rumps.MenuItem("Listener: starting…")
         self._status_item.set_callback(None)
         self.menu.add(self._status_item)
+        self._power_item = rumps.MenuItem("⚡ Power: —")
+        self._power_item.set_callback(None)
+        self.menu.add(self._power_item)
         self.menu.add(rumps.separator)
         self.menu.add(rumps.MenuItem("Quit", callback=self._quit))
+
+        # Live CPU/RAM monitor (proxy for heat) — updates every 2s
+        self._power_timer = rumps.Timer(self._update_power, 2)
+        self._power_timer.start()
+
+    def _update_power(self, _=None):
+        """Sample CPU% and RAM of the app + worker as a heat proxy."""
+        try:
+            pids = [str(os.getpid())]
+            if hasattr(self, "_worker") and self._worker and self._worker.poll() is None:
+                pids.append(str(self._worker.pid))
+            out = subprocess.run(
+                ["ps", "-o", "%cpu=,rss=", "-p", ",".join(pids)],
+                capture_output=True, text=True, timeout=2).stdout
+            cpu = 0.0
+            rss = 0
+            for line in out.strip().splitlines():
+                parts = line.split()
+                if len(parts) >= 2:
+                    cpu += float(parts[0])
+                    rss += int(parts[1])
+            self._power_item.title = f"⚡ CPU {cpu:.0f}%   RAM {rss/1024:.0f}MB"
+        except Exception:
+            pass
 
     def _populate_history(self, menu):
         history = self.cfg.get("history", [])

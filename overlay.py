@@ -374,23 +374,26 @@ class _PillCanvas(NSView):
         xs  = [rect.origin.x + i * w / (n - 1) for i in range(n)]
         amp = h / 2 * 0.9
 
-        # Three layered, phase-shifted lines for depth. Back layers are dimmer
-        # and slightly smaller, animated with a travelling wobble.
+        # Three translucent ribbons, all roughly full-height but each with a
+        # slightly different travelling phase. Where they overlap the blue
+        # deepens, so they read as ONE living blue ribbon, not separate bands.
         if active:
-            layers = [
-                (BLUE,  1.00, 0.0),
-                (_c(0.42, 0.78, 1.00, 0.45), 0.66, 1.7),
-                (_c(0.62, 0.55, 1.00, 0.30), 0.40, 3.4),
+            ribbons = [
+                (_c(0.42, 0.78, 1.00, 0.40), 0.0,  1.00),
+                (_c(0.40, 0.72, 1.00, 0.35), 2.1,  0.92),
+                (_c(0.55, 0.68, 1.00, 0.30), 4.2,  0.86),
             ]
         else:
-            layers = [(DIM, 1.00, 0.0), (_c(0.5, 0.5, 0.54, 0.4), 0.6, 2.0)]
+            ribbons = [
+                (_c(0.50, 0.50, 0.54, 0.45), 0.0, 1.00),
+                (_c(0.50, 0.50, 0.54, 0.30), 2.5, 0.9),
+            ]
 
-        for color, scale, shift in layers:
+        for color, shift, scale in ribbons:
             levels = []
             for i in range(n):
-                # travelling shimmer so back layers feel alive
-                wob = 1.0 + (0.18 * math.sin(self._phase * 2 * math.pi + i * 0.5 + shift)
-                             if active else 0.0)
+                wob = 1.0 + (0.22 * math.sin(self._phase * 2 * math.pi * 1.3 + i * 0.45 + shift)
+                             if active else 0.10 * math.sin(self._phase * 2 * math.pi + i * 0.4 + shift))
                 levels.append(base[i] * scale * wob)
             # taper edges to zero for a smooth fade
             taper = 5
