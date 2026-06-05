@@ -18,8 +18,10 @@ _LLM = {"model": None, "tokenizer": None}
 LLM_REPO = "mlx-community/Qwen2.5-1.5B-Instruct-4bit"
 
 
-def _llm_cleanup(text):
-    """Polish dictated text with a small local LLM. Returns cleaned text + seconds taken."""
+def _llm_cleanup(text, examples=None):
+    """Polish dictated text with a small local LLM. Returns cleaned text + seconds taken.
+    `examples` are recent (produced, corrected) pairs that teach the model the
+    user's personal correction style (few-shot personalization)."""
     t0 = time.time()
     try:
         import mlx_lm
@@ -31,7 +33,17 @@ def _llm_cleanup(text):
             finally:
                 sys.stdout, sys.stderr = _out, _err
 
+        shots = ""
+        for produced, corrected in (examples or []):
+            shots += f"Text: {produced}\nCorrected: {corrected}\n\n"
+
         prompt = (
+            "You clean up dictated speech-to-text. Fix punctuation, capitalization, "
+            "and obvious transcription errors. Do NOT add, remove, or rephrase content. "
+            "Return ONLY the corrected text with no preamble.\n\n"
+            "Here are examples of how this user likes corrections:\n\n" + shots +
+            f"Text: {text}\n\nCorrected:"
+        ) if shots else (
             "You clean up dictated speech-to-text. Fix punctuation, capitalization, "
             "and obvious transcription errors. Do NOT add, remove, or rephrase content. "
             "Return ONLY the corrected text with no preamble.\n\n"
@@ -92,7 +104,7 @@ def main():
 
             # LLM cleanup request (no audio payload)
             if "cleanup" in header:
-                cleaned, secs = _llm_cleanup(header["cleanup"])
+                cleaned, secs = _llm_cleanup(header["cleanup"], header.get("examples"))
                 sys.stdout.write(json.dumps({"text": cleaned, "secs": secs}) + "\n")
                 sys.stdout.flush()
                 continue

@@ -46,6 +46,7 @@ EOF
 echo "▸ Bundling transcription worker + venv reference…"
 RES="dist/WhisperLocal.app/Contents/Resources"
 cp transcribe_worker.py "$RES/transcribe_worker.py"
+cp trainer.py "$RES/trainer.py"
 python3 -c "import sys; print(sys.executable)" > "$RES/venv_python.txt"
 echo "  venv: $(cat $RES/venv_python.txt)"
 

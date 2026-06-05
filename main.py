@@ -15,6 +15,8 @@ import rumps
 import sounddevice as sd
 from AppKit import NSEvent, NSSound
 from PyObjCTools import AppHelper
+
+import trainer
 from pynput import keyboard
 
 # ---------------------------------------------------------------------------
@@ -93,7 +95,13 @@ CORRECTIONS = {
 
 
 def _apply_corrections(text: str) -> str:
-    for wrong, right in CORRECTIONS.items():
+    # Built-in corrections + anything the user has taught via Edit & Train
+    combined = dict(CORRECTIONS)
+    try:
+        combined.update(trainer.learned_corrections())
+    except Exception:
+        pass
+    for wrong, right in combined.items():
         text = re.sub(rf"\b{re.escape(wrong)}\b", right, text, flags=re.IGNORECASE)
     return text
 
@@ -157,6 +165,7 @@ class WhisperLocal(rumps.App):
         self._committed_samples = 0  # audio samples already finalized
         self._prev_words      = []   # last tick's uncommitted hypothesis (normalized)
         self._paused          = False
+        self._last_output     = ""   # last text we pasted (for Edit & Train)
 
         # Overlay (AppKit panel — created lazily on main thread)
         from overlay import OverlayPanel
@@ -239,6 +248,8 @@ class WhisperLocal(rumps.App):
         snd_item = rumps.MenuItem("Sounds", callback=self._toggle_sounds)
         snd_item.state = int(self.cfg.get("sounds", True))
         self.menu.add(snd_item)
+
+        self.menu.add(rumps.MenuItem("Edit Last & Train…", callback=self._edit_and_train))
 
         self.menu.add(rumps.separator)
         self.menu.add(rumps.MenuItem("Check Accessibility…", callback=self._open_accessibility))
@@ -334,6 +345,33 @@ class WhisperLocal(rumps.App):
         save_config(self.cfg)
         if self.cfg["sounds"]:
             self._play_sound("Tink")
+
+    def _edit_and_train(self, _):
+        """Show the last transcription in an editable dialog; learn from the edits."""
+        produced = self._last_output.strip()
+        if not produced:
+            rumps.alert("Edit & Train", "No transcription yet — dictate something first.")
+            return
+        resp = rumps.Window(
+            message="Fix anything wrong. Your corrections train the app.",
+            title="Edit Last & Train",
+            default_text=produced,
+            ok="Save & Learn",
+            cancel="Cancel",
+            dimensions=(420, 120),
+        ).run()
+        if not resp.clicked:
+            return
+        edited = resp.text.strip()
+        n_new = trainer.record_correction(produced, edited)
+        self._last_output = edited
+        if edited and edited != produced:
+            rumps.notification(
+                "WhisperLocal",
+                "Learned from your edit",
+                f"{n_new} new correction(s) added." if n_new else "Saved as training data.",
+                sound=False,
+            )
 
     def _play_sound(self, name: str):
         if not self.cfg.get("sounds", True):
@@ -491,8 +529,9 @@ class WhisperLocal(rumps.App):
         if not hasattr(self, "_worker") or self._worker.poll() is not None:
             return text
         try:
+            examples = trainer.few_shot_examples(3)
             with self._model_lock:
-                header = json.dumps({"cleanup": text}).encode()
+                header = json.dumps({"cleanup": text, "examples": examples}).encode()
                 self._worker.stdin.write(header + b"\n")
                 self._worker.stdin.flush()
                 line = self._worker.stdout.readline()
@@ -809,6 +848,7 @@ class WhisperLocal(rumps.App):
 
             self._overlay.push_text(final)
             self._add_history(final)
+            self._last_output = final
             self._paste(final + " ")   # trailing space so consecutive dictations don't collide
             # Satisfying completion flourish — green check + soft chime
             self._overlay.push_state("done")
