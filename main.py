@@ -53,8 +53,10 @@ ICON_TRANSCRIBING = str(_RESOURCES / "assets" / "menubar_proc.png")
 WAVEFORM_BINS = 48
 WAVEFORM_WINDOW = collections.deque([0.02] * WAVEFORM_BINS, maxlen=WAVEFORM_BINS)
 
-CHUNK_INTERVAL  = 1.2   # how often to re-transcribe the live tail
-SETTLE_MARGIN   = 1.0   # a segment is "settled" once it ends this many secs before the live edge
+FIRST_CHUNK_DELAY = 0.5  # transcribe the first slice quickly so text appears fast
+CHUNK_INTERVAL  = 0.8   # how often to re-transcribe the live tail
+SETTLE_MARGIN   = 0.5   # keep committed point close to the live edge
+MIN_TAIL_SECS   = 0.4   # minimum audio before a transcription pass
 MAX_TAIL_SECS   = 8.0   # force-commit if the unsettled tail grows beyond this (bounds latency)
 MAX_RECORD_SECS = 300
 
@@ -508,7 +510,7 @@ class WhisperLocal(rumps.App):
     # ------------------------------------------------------------------
 
     def _start_partial_timer(self):
-        self._partial_timer = threading.Timer(CHUNK_INTERVAL, self._chunk_tick)
+        self._partial_timer = threading.Timer(FIRST_CHUNK_DELAY, self._chunk_tick)
         self._partial_timer.daemon = True
         self._partial_timer.start()
 
@@ -549,7 +551,7 @@ class WhisperLocal(rumps.App):
             audio = np.concatenate(self.audio_chunks).flatten()
             tail = audio[self._committed_samples:]
             tail_dur = len(tail) / SAMPLE_RATE
-            if tail_dur < 0.6:
+            if tail_dur < MIN_TAIL_SECS:
                 return
 
             result = self._run_transcription_full(
