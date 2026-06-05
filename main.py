@@ -463,9 +463,12 @@ class WhisperLocal(rumps.App):
             return
         chunk = indata.copy()
         self.audio_chunks.append(chunk)
-        # RMS for waveform
-        rms = float(np.sqrt(np.mean(chunk ** 2)))
-        WAVEFORM_WINDOW.append(min(rms * 6.0, 1.0))
+        # Decibel-based level so quiet / distant speech still shows clearly.
+        rms = float(np.sqrt(np.mean(chunk ** 2))) + 1e-9
+        db = 20.0 * np.log10(rms)          # ~ -60 (silence) .. 0 (max)
+        level = (db + 60.0) / 45.0         # map -60..-15 dB -> 0..1
+        level = float(min(1.0, max(0.0, level)))
+        WAVEFORM_WINDOW.append(level)
         self._overlay.push_levels(list(WAVEFORM_WINDOW))
 
     # ------------------------------------------------------------------
