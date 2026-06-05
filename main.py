@@ -98,6 +98,13 @@ def _apply_corrections(text: str) -> str:
     return text
 
 
+def _fix_spacing(text: str) -> str:
+    """Ensure a single space after sentence punctuation (. ! ? , ;)."""
+    text = re.sub(r"([.!?,;])([A-Za-z])", r"\1 \2", text)
+    text = re.sub(r"\s{2,}", " ", text)
+    return text
+
+
 def _common_prefix_len(a, b) -> int:
     """Length of the longest matching prefix of two normalized word lists."""
     n = 0
@@ -759,6 +766,7 @@ class WhisperLocal(rumps.App):
 
             final = _collapse_repeats(final.strip())
             final = _apply_corrections(final)
+            final = _fix_spacing(final)
             if self.cfg["filler_removal"]:
                 final = FILLER_RE.sub("", final).strip()
             if not final:
@@ -778,6 +786,9 @@ class WhisperLocal(rumps.App):
             self._overlay.push_text(final)
             self._add_history(final)
             self._paste(final + " ")   # trailing space so consecutive dictations don't collide
+            # Satisfying completion flourish — green check, brief
+            self._overlay.push_state("done")
+            time.sleep(0.45)
         except Exception as e:
             print(f"Final paste error: {e}")
         finally:

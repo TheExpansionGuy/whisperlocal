@@ -197,11 +197,17 @@ class _PillCanvas(NSView):
         # Background
         BG.setFill(); pill.fill()
 
-        # Border ring
+        # Border ring (glows green on completion)
         inset = NSMakeRect(0.5, 0.5, w - 1, rect.size.height - 1)
         border = NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
             inset, CORNER - 0.5, CORNER - 0.5)
-        border.setLineWidth_(1.0); RING.setStroke(); border.stroke()
+        if self._state == "done":
+            border.setLineWidth_(1.6)
+            _c(0.30, 0.85, 0.45, 0.85).setStroke()
+        else:
+            border.setLineWidth_(1.0)
+            RING.setStroke()
+        border.stroke()
 
         # Divider + transcript
         if total_h > PILL_H + 4:
@@ -218,7 +224,8 @@ class _PillCanvas(NSView):
         # Labels
         state_label = {"recording": "Listening",
                        "transcribing": "Transcribing",
-                       "polishing": "Enhancing"}.get(self._state, "")
+                       "polishing": "Enhancing",
+                       "done": "Done"}.get(self._state, "")
         _draw_text(state_label, _ATTRS_STATE,
                    _vcenter_rect(lbl_x, LBL_W, 16, 0, PILL_H))
         _draw_text(self._timer_str, _ATTRS_TIMER,
@@ -294,9 +301,22 @@ class _PillCanvas(NSView):
         path.closePath()
         path.fill()
 
+    def _draw_check(self, cx, cy):
+        """A green checkmark — shown briefly on successful paste."""
+        _c(0.30, 0.85, 0.45, 1.0).setStroke()
+        path = NSBezierPath.bezierPath()
+        path.setLineWidth_(2.4)
+        path.moveToPoint_(NSMakePoint(cx - 6, cy))
+        path.lineToPoint_(NSMakePoint(cx - 1.5, cy - 5))
+        path.lineToPoint_(NSMakePoint(cx + 6.5, cy + 5))
+        path.stroke()
+
     def _draw_indicator(self, cx, cy):
         if self._state == "polishing":
             self._draw_sparkle(cx, cy)
+            return
+        if self._state == "done":
+            self._draw_check(cx, cy)
             return
 
         m = self._morph  # 0=dot, 1=three dots
