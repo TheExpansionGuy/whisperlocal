@@ -678,7 +678,8 @@ class WhisperLocal(rumps.App):
 
             # Optional LLM cleanup pass (failures fall back to raw text)
             if self.cfg.get("llm_cleanup", False):
-                self._overlay.push_state("transcribing")  # keep the dots, no emoji
+                self._overlay.push_text(final)
+                self._overlay.push_state("polishing")  # sparkle + "Enhancing"
                 try:
                     cleaned = self._run_cleanup(final)
                     if cleaned:
@@ -724,38 +725,17 @@ class WhisperLocal(rumps.App):
             return None, None
 
     def _paste(self, text: str):
-        """Always use clipboard paste. AX is attempted first as a bonus but never relied on."""
-        self._ax_insert(text)  # best-effort, ignored if it fails or does nothing
-        self._clipboard_paste(text)
-
-    def _ax_insert(self, text: str) -> bool:
-        try:
-            import ApplicationServices as AS
-            if self._target_element is None:
-                return False
-            AS.AXUIElementSetAttributeValue(
-                self._target_element, AS.kAXSelectedTextAttribute, text
-            )
-        except Exception:
-            pass
-        return False  # always fall through to clipboard paste
-
-    def _clipboard_paste(self, text: str):
-        """Re-activate target app then paste from clipboard using pynput (Accessibility-backed)."""
-        try:
-            if self._target_app:
-                self._target_app.activateWithOptions_(1 << 1)
-                time.sleep(0.25)
-        except Exception:
-            pass
-
+        """Paste via clipboard + ⌘V. Fully thread-safe: pyperclip uses pbcopy,
+        pynput uses Quartz events — neither touches AppKit, so this is safe to
+        call from the transcription background thread without segfaulting.
+        Our overlay is a non-activating panel, so the target field keeps focus."""
         prev = pyperclip.paste()
         try:
             pyperclip.copy(text)
-            time.sleep(0.1)
+            time.sleep(0.05)
             with self._kb.pressed(keyboard.Key.cmd):
                 self._kb.tap("v")
-            time.sleep(0.15)
+            time.sleep(0.1)
         finally:
             pyperclip.copy(prev)
 

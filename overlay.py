@@ -217,7 +217,8 @@ class _PillCanvas(NSView):
 
         # Labels
         state_label = {"recording": "Listening",
-                       "transcribing": "Transcribing"}.get(self._state, "")
+                       "transcribing": "Transcribing",
+                       "polishing": "Enhancing"}.get(self._state, "")
         _draw_text(state_label, _ATTRS_STATE,
                    _vcenter_rect(lbl_x, LBL_W, 16, 0, PILL_H))
         _draw_text(self._timer_str, _ATTRS_TIMER,
@@ -274,7 +275,30 @@ class _PillCanvas(NSView):
                 x += w
             y -= LINE_H
 
+    def _draw_sparkle(self, cx, cy):
+        """A 4-pointed star (sparkle) that pulses — signals AI enhancement."""
+        pulse = 0.6 + 0.4 * math.sin(self._phase * 2 * math.pi)
+        outer = 9 * pulse
+        inner = 2.6 * pulse
+        # Gradient-ish accent colour (indigo→blue feel)
+        _c(0.55, 0.80, 1.0, 0.95).setFill()
+        pts = []
+        for i in range(8):
+            ang = math.pi / 2 + i * math.pi / 4
+            r = outer if i % 2 == 0 else inner
+            pts.append((cx + r * math.cos(ang), cy + r * math.sin(ang)))
+        path = NSBezierPath.bezierPath()
+        path.moveToPoint_(NSMakePoint(*pts[0]))
+        for p in pts[1:]:
+            path.lineToPoint_(NSMakePoint(*p))
+        path.closePath()
+        path.fill()
+
     def _draw_indicator(self, cx, cy):
+        if self._state == "polishing":
+            self._draw_sparkle(cx, cy)
+            return
+
         m = self._morph  # 0=dot, 1=three dots
 
         if m < 0.01:
