@@ -273,6 +273,7 @@ class WhisperLocal(rumps.App):
         self._pers_status = rumps.MenuItem(self._personalize_status())
         self._pers_status.set_callback(None)
         self.menu.add(self._pers_status)
+        self.menu.add(rumps.MenuItem("Voice Training…", callback=self._show_training))
 
         self.menu.add(rumps.separator)
         self.menu.add(rumps.MenuItem("Check Accessibility…", callback=self._open_accessibility))
@@ -373,13 +374,36 @@ class WhisperLocal(rumps.App):
         save_config(self.cfg)
         self._refresh_personalize_status()
 
+    def _show_training(self, _):
+        s = trainer.stats()
+        bar = trainer.progress_bar(s["progress"], 16)
+        mb = trainer.corpus_bytes() / (1024 * 1024)
+        body = (
+            f"🎙  Voice Level {s['level']}\n\n"
+            f"{bar}\n"
+            f"{s['into_level']} / {trainer.SAMPLES_PER_LEVEL} dictations to your next voice update\n\n"
+            f"Total dictations learned:  {s['samples']}\n"
+            f"Words dictated:            {s['words']}\n"
+            f"Corrections you've made:   {s['corrections']}\n"
+            f"Voice data stored:         {mb:.0f} MB\n\n"
+            "Every dictation teaches the model your voice. At each level it can "
+            "retrain to hear you more accurately."
+        )
+        ready = s.get("ready_to_train") and s["samples"] > 0
+        rumps.alert(
+            title="Voice Training",
+            message=body,
+            ok=("Train now" if ready else "OK"),
+        )
+
     def _personalize_status(self) -> str:
         try:
-            n = trainer.sample_count()
-            mb = trainer.corpus_bytes() / (1024 * 1024)
-            return f"  Learned from {n} dictations ({mb:.0f} MB)"
+            s = trainer.stats()
+            bar = trainer.progress_bar(s["progress"])
+            return (f"  🎙 Voice Lv {s['level']}  {bar}  "
+                    f"{s['into_level']}/{trainer.SAMPLES_PER_LEVEL} to next update")
         except Exception:
-            return "  Learned from 0 dictations"
+            return "  🎙 Voice Lv 0"
 
     def _refresh_personalize_status(self):
         if hasattr(self, "_pers_status"):

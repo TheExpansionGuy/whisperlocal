@@ -61,6 +61,39 @@ def sample_count() -> int:
     return len(_manifest_rows())
 
 
+# --- Gamified progress -------------------------------------------------------
+SAMPLES_PER_LEVEL = 50      # verified dictations per training milestone
+
+
+def stats() -> dict:
+    """Progress info for the gamified 'voice model' display."""
+    rows = _manifest_rows()
+    total = len(rows)
+    verified = sum(1 for r in rows if r.get("corrected") or True)  # all confirmed count
+    words = sum(len(r.get("text", "").split()) for r in rows)
+    corrections = sum(1 for r in rows if r.get("corrected"))
+
+    level = total // SAMPLES_PER_LEVEL
+    into_level = total % SAMPLES_PER_LEVEL
+    to_next = SAMPLES_PER_LEVEL - into_level
+    progress = into_level / SAMPLES_PER_LEVEL
+    return {
+        "samples": total,
+        "words": words,
+        "corrections": corrections,
+        "level": level,
+        "into_level": into_level,
+        "to_next": to_next,
+        "progress": progress,
+        "ready_to_train": into_level == 0 and total > 0,
+    }
+
+
+def progress_bar(progress: float, width: int = 10) -> str:
+    filled = int(round(progress * width))
+    return "▓" * filled + "░" * (width - filled)
+
+
 def corpus_bytes() -> int:
     try:
         return sum(p.stat().st_size for p in TRAIN_DIR.glob("*.wav"))
