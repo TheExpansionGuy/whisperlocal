@@ -1,39 +1,39 @@
 #!/bin/bash
+# Fast local update — copies Python sources into the installed app and restarts.
+# Resources is on sys.path (see main.py), so plain .py files here are what load.
 set -e
 APP="/Applications/WhisperLocal.app"
 RES="$APP/Contents/Resources"
-ZIP=$(ls "$RES/lib/python"*.zip)
 
 echo "▸ Updating Python sources..."
-cp main.py "$RES/main.py"
+cp main.py             "$RES/main.py"
+cp overlay.py          "$RES/overlay.py"
+cp trainer.py          "$RES/trainer.py"
 cp transcribe_worker.py "$RES/transcribe_worker.py"
-cp trainer.py "$RES/trainer.py"
 
-echo "▸ Compiling and injecting overlay.py into bundle zip..."
-python3 - "$ZIP" <<'EOF'
-import sys, zipfile, py_compile, tempfile, os, shutil
-
+# Remove any stale compiled copy of overlay in the zip so the fresh .py wins
+ZIP=$(ls "$RES/lib/python"*.zip 2>/dev/null || true)
+if [ -n "$ZIP" ]; then
+  python3 - "$ZIP" <<'EOF'
+import sys, zipfile, os
 zip_path = sys.argv[1]
-src = "overlay.py"
-
-# Compile overlay.py to a temp pyc
-tmp = tempfile.mktemp(suffix=".pyc")
-py_compile.compile(src, tmp, doraise=True)
-
-# Read the existing zip and rebuild it with updated overlay.pyc
-tmp_zip = zip_path + ".tmp"
-with zipfile.ZipFile(zip_path, "r") as zin, \
-     zipfile.ZipFile(tmp_zip, "w", zipfile.ZIP_DEFLATED) as zout:
+tmp = zip_path + ".tmp"
+removed = 0
+with zipfile.ZipFile(zip_path) as zin, \
+     zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as zout:
     for item in zin.infolist():
         if item.filename == "overlay.pyc":
-            zout.write(tmp, "overlay.pyc")
-        else:
-            zout.writestr(item, zin.read(item.filename))
-
-os.replace(tmp_zip, zip_path)
-os.unlink(tmp)
-print("  overlay.pyc updated in zip")
+            removed += 1
+            continue
+        zout.writestr(item, zin.read(item.filename))
+os.replace(tmp, zip_path)
+if removed:
+    print(f"  removed stale overlay.pyc from zip")
 EOF
+fi
+
+# Clear any cached bytecode
+find "$RES" -name "overlay*.pyc" -not -path "*/lib/*" -delete 2>/dev/null || true
 
 echo "▸ Restarting WhisperLocal..."
 pkill -x WhisperLocal 2>/dev/null || true
