@@ -9,6 +9,7 @@ echo "▸ Updating Python sources..."
 cp main.py             "$RES/main.py"
 cp overlay.py          "$RES/overlay.py"
 cp trainer.py          "$RES/trainer.py"
+cp review_editor.py    "$RES/review_editor.py"
 cp transcribe_worker.py "$RES/transcribe_worker.py"
 
 # Remove any stale compiled copy of overlay in the zip so the fresh .py wins

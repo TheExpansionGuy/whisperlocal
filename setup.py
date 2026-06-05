@@ -2,7 +2,7 @@ from setuptools import setup
 
 APP = ["main.py"]
 DATA_FILES = [
-    ("", ["overlay.py", "trainer.py", "transcribe_worker.py"]),
+    ("", ["overlay.py", "trainer.py", "transcribe_worker.py", "review_editor.py"]),
     ("assets", [
         "assets/menubar.png",
         "assets/menubar@2x.png",

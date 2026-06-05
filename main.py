@@ -25,6 +25,7 @@ else:
     sys.path.insert(0, str(Path(__file__).parent))
 
 import trainer
+from review_editor import ReviewEditor
 from pynput import keyboard
 
 # ---------------------------------------------------------------------------
@@ -34,7 +35,7 @@ from pynput import keyboard
 CONFIG_PATH = Path.home() / ".whisperlocal" / "config.json"
 DEFAULTS = {"model": "mlx-community/whisper-small.en-mlx", "filler_removal": True,
             "llm_cleanup": False, "low_power": False, "sounds": True,
-            "personalize": True, "history": []}
+            "personalize": True, "review": False, "history": []}
 
 LOW_POWER_MODEL = "mlx-community/whisper-base.en-mlx"  # lighter model when low-power on
 HISTORY_MAX = 10
@@ -179,6 +180,8 @@ class WhisperLocal(rumps.App):
         # Overlay (AppKit panel — created lazily on main thread)
         from overlay import OverlayPanel
         self._overlay = OverlayPanel.alloc().init()
+        self._editor = ReviewEditor.alloc().init()
+        self._review_audio = None
 
         self._build_menu()
         self._request_accessibility()
@@ -259,6 +262,10 @@ class WhisperLocal(rumps.App):
         self.menu.add(snd_item)
 
         self.menu.add(rumps.MenuItem("Edit Last & Train…", callback=self._edit_and_train))
+
+        review_item = rumps.MenuItem("Review before paste", callback=self._toggle_review)
+        review_item.state = int(self.cfg.get("review", False))
+        self.menu.add(review_item)
 
         pers_item = rumps.MenuItem("Personalize (learn my voice)", callback=self._toggle_personalize)
         pers_item.state = int(self.cfg.get("personalize", True))
@@ -354,6 +361,11 @@ class WhisperLocal(rumps.App):
         # Model changes with low-power, so restart the worker
         self._model_ready = False
         threading.Thread(target=self._load_model, daemon=True).start()
+
+    def _toggle_review(self, sender):
+        self.cfg["review"] = not self.cfg.get("review", False)
+        sender.state = int(self.cfg["review"])
+        save_config(self.cfg)
 
     def _toggle_personalize(self, sender):
         self.cfg["personalize"] = not self.cfg.get("personalize", True)
@@ -886,31 +898,61 @@ class WhisperLocal(rumps.App):
                 except Exception as e:
                     print(f"Cleanup failed, pasting raw: {e}")
 
-            self._overlay.push_text(final)
-            self._add_history(final)
-            self._last_output = final
-            self._paste(final + " ")   # trailing space so consecutive dictations don't collide
+            # Capture the audio now (for personalization / review labelling)
+            self._review_audio = (np.concatenate(self.audio_chunks).flatten()
+                                  if self.audio_chunks else None)
 
-            # Ambient personalization: bank (audio → text) for future fine-tuning
-            if self.cfg.get("personalize", True):
-                try:
-                    full_audio = np.concatenate(self.audio_chunks).flatten() \
-                        if self.audio_chunks else None
-                    trainer.save_sample(full_audio, SAMPLE_RATE, final)
-                    self._refresh_personalize_status()
-                except Exception as e:
-                    print(f"Sample save error: {e}")
-            # Satisfying completion flourish — green check + soft chime
-            self._overlay.push_state("done")
-            self._play_sound("Pop")   # subtle completion tap
-            time.sleep(0.45)
+            if self.cfg.get("review", False):
+                # Hand off to the inline editor; paste happens on confirm.
+                self._overlay.hide_async()
+                AppHelper.callAfter(self._present_review, final)
+                return
+
+            self._commit_final(final)
         except Exception as e:
             print(f"Final paste error: {e}")
         finally:
             self._transcribing = False
-            self._overlay.push_state("idle")
-            self._overlay.hide_async()
-            self._set_state("idle")
+            if not self.cfg.get("review", False):
+                self._overlay.push_state("idle")
+                self._overlay.hide_async()
+                self._set_state("idle")
+
+    def _present_review(self, final):
+        """Show the editable confirm field (main thread)."""
+        self._editor.present_text_onSubmit_onCancel_(
+            final, self._on_review_submit, self._on_review_cancel)
+
+    def _on_review_submit(self, edited):
+        final = (edited or "").strip()
+        self._set_state("idle")
+        if final:
+            self._commit_final(final, play=True)
+
+    def _on_review_cancel(self):
+        self._set_state("idle")
+
+    def _commit_final(self, final, play=True):
+        """Paste, store history, bank training sample. Used by both paths."""
+        final = final.strip()
+        if not final:
+            return
+        self._overlay.push_text(final)
+        self._add_history(final)
+        self._last_output = final
+
+        # Bank verified (audio → text) sample
+        if self.cfg.get("personalize", True):
+            try:
+                trainer.save_sample(self._review_audio, SAMPLE_RATE, final)
+                self._refresh_personalize_status()
+            except Exception as e:
+                print(f"Sample save error: {e}")
+
+        # Paste after a beat so focus has returned from any editor panel
+        threading.Timer(0.18, lambda: self._paste(final + " ")).start()
+        if play:
+            self._play_sound("Pop")
 
     def _add_history(self, text: str):
         history = self.cfg.setdefault("history", [])
