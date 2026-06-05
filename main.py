@@ -23,7 +23,9 @@ from pynput import keyboard
 
 CONFIG_PATH = Path.home() / ".whisperlocal" / "config.json"
 DEFAULTS = {"model": "mlx-community/whisper-small.en-mlx", "filler_removal": True,
-            "llm_cleanup": False, "history": []}
+            "llm_cleanup": False, "low_power": False, "history": []}
+
+LOW_POWER_MODEL = "mlx-community/whisper-base.en-mlx"  # lighter model when low-power on
 HISTORY_MAX = 10
 
 FILLER_RE = re.compile(
@@ -223,6 +225,10 @@ class WhisperLocal(rumps.App):
         llm_item.state = int(self.cfg.get("llm_cleanup", False))
         self.menu.add(llm_item)
 
+        lp_item = rumps.MenuItem("Low Power Mode", callback=self._toggle_low_power)
+        lp_item.state = int(self.cfg.get("low_power", False))
+        self.menu.add(lp_item)
+
         self.menu.add(rumps.separator)
         self.menu.add(rumps.MenuItem("Check Accessibility…", callback=self._open_accessibility))
         self._status_item = rumps.MenuItem("Listener: starting…")
@@ -302,6 +308,20 @@ class WhisperLocal(rumps.App):
         self.cfg["llm_cleanup"] = not self.cfg.get("llm_cleanup", False)
         sender.state = int(self.cfg["llm_cleanup"])
         save_config(self.cfg)
+
+    def _toggle_low_power(self, sender):
+        self.cfg["low_power"] = not self.cfg.get("low_power", False)
+        sender.state = int(self.cfg["low_power"])
+        save_config(self.cfg)
+        # Model changes with low-power, so restart the worker
+        self._model_ready = False
+        threading.Thread(target=self._load_model, daemon=True).start()
+
+    def _effective_model(self) -> str:
+        return LOW_POWER_MODEL if self.cfg.get("low_power", False) else self.cfg["model"]
+
+    def _chunk_interval(self) -> float:
+        return 1.5 if self.cfg.get("low_power", False) else CHUNK_INTERVAL
 
     def _build_mic_menu(self, parent):
         parent.clear() if hasattr(parent, "_menu") and parent._menu else None
@@ -399,19 +419,28 @@ class WhisperLocal(rumps.App):
     def _load_model(self):
         """Start persistent worker — stays alive between transcriptions."""
         self._set_state("transcribing")
+        model = self._effective_model()
         try:
-            self._worker = subprocess.Popen(
-                [self._venv_python(), self._worker_script(), self.cfg["model"], "en"],
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                env=self._worker_env(),
-            )
-            line = self._worker.stdout.readline().strip()
+            with self._model_lock:
+                # Terminate any existing worker (e.g. when switching models)
+                if hasattr(self, "_worker") and self._worker and self._worker.poll() is None:
+                    try:
+                        self._worker.terminate()
+                    except Exception:
+                        pass
+                self._worker = subprocess.Popen(
+                    [self._venv_python(), self._worker_script(), model, "en"],
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    env=self._worker_env(),
+                )
+                line = self._worker.stdout.readline().strip()
             if line == b"READY":
                 self._model_ready = True
-                model_short = self.cfg["model"].split("/")[-1]
-                self._set_status(f"MLX ✅  {model_short} — hold ⌥")
+                tag = "🔋 " if self.cfg.get("low_power", False) else ""
+                model_short = model.split("/")[-1]
+                self._set_status(f"MLX ✅  {tag}{model_short} — hold ⌥")
             elif line.startswith(b"ERROR:"):
                 raise RuntimeError(line.decode())
             else:
@@ -635,8 +664,8 @@ class WhisperLocal(rumps.App):
         if not self.recording:
             return
         threading.Thread(target=self._process_chunk, daemon=True).start()
-        # Reschedule
-        self._partial_timer = threading.Timer(CHUNK_INTERVAL, self._chunk_tick)
+        # Reschedule (slower cadence in low-power mode)
+        self._partial_timer = threading.Timer(self._chunk_interval(), self._chunk_tick)
         self._partial_timer.daemon = True
         self._partial_timer.start()
 
@@ -653,6 +682,12 @@ class WhisperLocal(rumps.App):
             tail = audio[self._committed_samples:]
             tail_dur = len(tail) / SAMPLE_RATE
             if tail_dur < MIN_TAIL_SECS:
+                return
+
+            # Silence gating: skip the (expensive) transcription pass if the tail
+            # is essentially quiet — nothing to transcribe, saves a lot of compute.
+            tail_rms = float(np.sqrt(np.mean(tail ** 2)))
+            if tail_rms < 0.004:
                 return
 
             result = self._run_transcription_full(
