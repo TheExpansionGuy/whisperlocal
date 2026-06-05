@@ -61,6 +61,7 @@ def _layout(w):
 MORPH_SPEED   = 2.5   # units/sec for state morph (0→1)
 WORD_FADE_SPD = 5.0   # alpha/sec for word fade-in
 RING_SPEED    = 1.2   # ripple ring expansion speed
+GAP           = 9     # gap between the control pill and the transcript block
 
 
 # ---------------------------------------------------------------------------
@@ -75,6 +76,8 @@ def _para(align, wrap=False):
 _FONT_SM  = NSFont.systemFontOfSize_weight_(12.0, 0.2)
 _FONT_MED = NSFont.systemFontOfSize_weight_(12.5, 0.2)
 _FONT_TX  = NSFont.systemFontOfSize_weight_(13.5, 0.3)
+# Italic variant for not-yet-committed ("settling") words
+_FONT_TX_SETTLING = NSFont.fontWithName_size_("HelveticaNeue-Italic", 13.5) or _FONT_TX
 
 _ATTRS_STATE = {NSFontAttributeName: _FONT_MED, NSForegroundColorAttributeName: WHITE,
                 NSParagraphStyleAttributeName: _para(NSTextAlignmentLeft)}
@@ -112,9 +115,8 @@ class _PillCanvas(NSView):
         # Ripple rings: list of (start_time, max_radius, color)
         self._rings        = []
 
-        # Word-by-word transcript: list of (word, alpha)
-        self._word_alphas  = []        # [(word_str, alpha_float), ...]
-        self._last_words   = []        # words already fully revealed
+        # Word-by-word transcript: [(word, alpha, settled), ...]
+        self._word_alphas  = []
 
         return self
 
@@ -149,9 +151,9 @@ class _PillCanvas(NSView):
             self._morph = max(0.0, min(1.0, self._morph))
 
         # Advance word alphas
-        for i, (w, a) in enumerate(self._word_alphas):
+        for i, (w, a, s) in enumerate(self._word_alphas):
             if a < 1.0:
-                self._word_alphas[i] = (w, min(1.0, a + WORD_FADE_SPD * dt))
+                self._word_alphas[i] = (w, min(1.0, a + WORD_FADE_SPD * dt), s)
 
         self.setNeedsDisplay_(True)
 
@@ -163,19 +165,19 @@ class _PillCanvas(NSView):
         self._timer_str = t or ""
         self.setNeedsDisplay_(True)
 
-    def setWords_(self, new_words):
-        """Diff against existing words; fade in only the new ones."""
-        old = [w for w, _ in self._word_alphas]
-        # Find common prefix
-        common = 0
-        for i, (ow, nw) in enumerate(zip(old, new_words)):
-            if ow == nw: common = i + 1
-            else: break
-
-        # Keep already-revealed words, add new ones at alpha=0
-        kept = self._word_alphas[:common]
-        for w in new_words[common:]:
-            kept.append((w, 0.0))
+    def setWords_(self, parts):
+        """parts = [committed_str, tail_str].
+        Committed words render solid (settled=True); tail words shimmer (settling)."""
+        committed, tail = parts
+        new = [(w, True) for w in committed.split()] + \
+              [(w, False) for w in tail.split()]
+        old = self._word_alphas
+        kept = []
+        for i, (w, settled) in enumerate(new):
+            if i < len(old) and old[i][0] == w:
+                kept.append((w, old[i][1], settled))   # keep fade alpha, update settled
+            else:
+                kept.append((w, 0.0, settled))         # new word → fade in
         self._word_alphas = kept
         self.setNeedsDisplay_(True)
 
@@ -188,40 +190,19 @@ class _PillCanvas(NSView):
     def drawRect_(self, rect):
         total_h = rect.size.height
         w = rect.size.width
-        ind_x, wav_x, wav_w, lbl_x, tmr_x = _layout(w)
 
-        pill = NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
-            rect, CORNER, CORNER)
-        pill.addClip()
+        # --- Control pill: fixed compact width, centred at the bottom ---------
+        pill_w = PANEL_W_COMPACT
+        pill_x = (w - pill_w) / 2
+        pill_rect = NSMakeRect(pill_x, 0, pill_w, PILL_H)
+        self._draw_block(pill_rect, green=(self._state == "done"))
 
-        # Background
-        BG.setFill(); pill.fill()
+        ind_x, wav_x, wav_w, lbl_x, tmr_x = _layout(pill_w)
+        ind_x += pill_x; wav_x += pill_x; lbl_x += pill_x; tmr_x += pill_x
 
-        # Border ring (glows green on completion)
-        inset = NSMakeRect(0.5, 0.5, w - 1, rect.size.height - 1)
-        border = NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
-            inset, CORNER - 0.5, CORNER - 0.5)
-        if self._state == "done":
-            border.setLineWidth_(1.6)
-            _c(0.30, 0.85, 0.45, 0.85).setStroke()
-        else:
-            border.setLineWidth_(1.0)
-            RING.setStroke()
-        border.stroke()
-
-        # Divider + transcript
-        if total_h > PILL_H + 4:
-            div = NSBezierPath.bezierPath()
-            div.moveToPoint_(NSMakePoint(PAD, PILL_H))
-            div.lineToPoint_(NSMakePoint(w - PAD, PILL_H))
-            div.setLineWidth_(0.5); DIVIDER.setStroke(); div.stroke()
-            self._draw_transcript(total_h, w)
-
-        # Pill strip
         self._draw_indicator(ind_x + IND_W / 2, PILL_H / 2)
         self._draw_waveform(NSMakeRect(wav_x, (PILL_H - 26) / 2, wav_w, 26))
 
-        # Labels
         state_label = {"recording": "Listening",
                        "transcribing": "Transcribing",
                        "polishing": "Enhancing",
@@ -231,55 +212,66 @@ class _PillCanvas(NSView):
         _draw_text(self._timer_str, _ATTRS_TIMER,
                    _vcenter_rect(tmr_x, TMR_W, 16, 0, PILL_H))
 
-    def _draw_transcript(self, total_h, w):
-        """Draw words top-to-bottom with per-word alpha fade-in."""
+        # --- Transcript: separate floating block above the pill --------------
+        if total_h > PILL_H + GAP and self._word_alphas:
+            tx_rect = NSMakeRect(0, PILL_H + GAP, w, total_h - PILL_H - GAP)
+            self._draw_block(tx_rect, green=False)
+            self._draw_transcript(tx_rect)
+
+    def _draw_block(self, r, green=False):
+        """Draw a rounded background block with border."""
+        path = NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(r, CORNER, CORNER)
+        BG.setFill(); path.fill()
+        inset = NSMakeRect(r.origin.x + 0.5, r.origin.y + 0.5,
+                           r.size.width - 1, r.size.height - 1)
+        border = NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
+            inset, CORNER - 0.5, CORNER - 0.5)
+        if green:
+            border.setLineWidth_(1.6); _c(0.30, 0.85, 0.45, 0.85).setStroke()
+        else:
+            border.setLineWidth_(1.0); RING.setStroke()
+        border.stroke()
+
+    def _draw_transcript(self, r):
+        """Draw words inside rect r, with confidence shimmer:
+        committed words are solid white, settling words are dim + italic + pulsing."""
         if not self._word_alphas:
             return
+        max_w = r.size.width - TX_PAD_H * 2
 
-        max_w = w - TX_PAD_H * 2
-
-        # First pass: lay out words into lines
-        lines = []      # list of [(word, alpha), ...]
-        current_line = []
-        current_w = 0.0
-
-        for word, alpha in self._word_alphas:
-            attrs = {
-                NSFontAttributeName: _FONT_TX,
-                NSForegroundColorAttributeName: WHITE,
-                NSParagraphStyleAttributeName: _para(NSTextAlignmentLeft),
-            }
-            s = NSString.stringWithString_(word + " ")
-            sz = s.sizeWithAttributes_(attrs)
-            if current_w + sz.width > max_w and current_line:
-                lines.append(current_line)
-                current_line = [(word, alpha, sz.width)]
-                current_w = sz.width
+        # Lay out into lines (measuring with the committed font for stable widths)
+        lines, cur, cur_w = [], [], 0.0
+        for word, alpha, settled in self._word_alphas:
+            sz = NSString.stringWithString_(word + " ").sizeWithAttributes_(
+                {NSFontAttributeName: _FONT_TX})
+            if cur_w + sz.width > max_w and cur:
+                lines.append(cur); cur = [(word, alpha, settled, sz.width)]; cur_w = sz.width
             else:
-                current_line.append((word, alpha, sz.width))
-                current_w += sz.width
-        if current_line:
-            lines.append(current_line)
-
-        # Cap at MAX_LINES, showing the most recent lines
+                cur.append((word, alpha, settled, sz.width)); cur_w += sz.width
+        if cur:
+            lines.append(cur)
         lines = lines[-MAX_LINES:]
 
-        # Second pass: draw top-to-bottom
-        # In AppKit y-up coords: top of transcript = total_h - TX_PAD_V
-        # Each line goes down by LINE_H
-        y = total_h - TX_PAD_V - LINE_H
+        # Settling words gently pulse in brightness
+        shimmer = 0.55 + 0.18 * math.sin(self._phase * 2 * math.pi * 1.4)
+
+        y = r.origin.y + r.size.height - TX_PAD_V - LINE_H
         for line in lines:
-            x = TX_PAD_H
-            for word, alpha, w in line:
-                attrs = {
-                    NSFontAttributeName: _FONT_TX,
-                    NSForegroundColorAttributeName: NSColor.colorWithRed_green_blue_alpha_(
-                        0.92, 0.92, 0.94, alpha),
-                    NSParagraphStyleAttributeName: _para(NSTextAlignmentLeft),
-                }
-                s = NSString.stringWithString_(word + " ")
-                s.drawAtPoint_withAttributes_(NSMakePoint(x, y), attrs)
-                x += w
+            x = r.origin.x + TX_PAD_H
+            for word, alpha, settled, wdt in line:
+                if settled:
+                    col = NSColor.colorWithRed_green_blue_alpha_(0.94, 0.94, 0.96, alpha)
+                    font = _FONT_TX
+                else:
+                    col = NSColor.colorWithRed_green_blue_alpha_(
+                        0.70, 0.82, 1.0, alpha * shimmer)
+                    font = _FONT_TX_SETTLING
+                attrs = {NSFontAttributeName: font,
+                         NSForegroundColorAttributeName: col,
+                         NSParagraphStyleAttributeName: _para(NSTextAlignmentLeft)}
+                NSString.stringWithString_(word + " ").drawAtPoint_withAttributes_(
+                    NSMakePoint(x, y), attrs)
+                x += wdt
             y -= LINE_H
 
     def _draw_sparkle(self, cx, cy):
@@ -464,6 +456,8 @@ class OverlayPanel(NSObject):
         self._record_start = 0.0
         self._state        = "idle"
         self._transcript   = ""
+        self._committed_disp = ""
+        self._tail_disp      = ""
         self._power        = ""
         return self
 
@@ -487,17 +481,16 @@ class OverlayPanel(NSObject):
 
     def _updateLayout(self):
         if not self._panel: return
-        words = self._transcript.strip().split() if self._transcript.strip() else []
+        combined = (self._committed_disp + " " + self._tail_disp).strip()
+        words = combined.split() if combined else []
 
-        # Compact width when no text; widen for transcript
+        # Window is always at least the compact pill width; widens for transcript.
         panel_w = PANEL_W_WIDE if words else PANEL_W_COMPACT
 
         if not words:
             text_h = 0
         else:
-            # Measure real word widths (same logic as drawing) so we reserve the
-            # exact number of lines and never leave an empty trailing line.
-            max_w = panel_w - TX_PAD_H * 2
+            max_w = PANEL_W_WIDE - TX_PAD_H * 2
             attrs = {NSFontAttributeName: _FONT_TX}
             lines = 1; cur_w = 0.0
             for word in words:
@@ -508,21 +501,20 @@ class OverlayPanel(NSObject):
                     cur_w += wd
             text_h = min(lines, MAX_LINES) * LINE_H + TX_PAD_V * 2
 
-        total_h = PILL_H + text_h
+        # Two-block layout: pill at bottom, gap, transcript block above
+        total_h = PILL_H + (GAP + text_h if text_h else 0)
         sf = NSScreen.mainScreen().frame()
         x = (sf.size.width - panel_w) / 2 + sf.origin.x
         y = sf.origin.y + BOTTOM
         new_frame = NSMakeRect(x, y, panel_w, total_h)
 
-        # Animated resize (width + height)
         NSAnimationContext.beginGrouping()
-        NSAnimationContext.currentContext().setDuration_(0.22)
+        NSAnimationContext.currentContext().setDuration_(0.18)
         self._panel.animator().setFrame_display_(new_frame, True)
         NSAnimationContext.endGrouping()
 
         self._canvas.setFrame_(NSMakeRect(0, 0, panel_w, total_h))
-        if self._canvas:
-            self._canvas.setWords_(words)
+        self._canvas.setWords_([self._committed_disp, self._tail_disp])
 
     def _startTimer(self):
         if self._anim_timer: return
@@ -552,6 +544,8 @@ class OverlayPanel(NSObject):
     def show(self):
         if self._panel is None: self._setup()
         self._transcript = ""
+        self._committed_disp = ""
+        self._tail_disp = ""
         self._canvas.clearWords_(None)
         self._updateLayout()
         self._panel.setAlphaValue_(1.0)
@@ -575,16 +569,28 @@ class OverlayPanel(NSObject):
                 self._canvas.setTimer_("")
                 self._canvas.clearWords_(None)
             self._transcript = ""
+            self._committed_disp = ""
+            self._tail_disp = ""
             self._updateLayout()
 
     def setLevelsObj_(self, lvl):
         if self._canvas: self._canvas.setLevels_(lvl)
 
     def setTextObj_(self, text):
+        # Single-string update → all committed (used for final text)
         text = text or ""
-        if text == self._transcript:
-            return  # no change — skip relayout/animation
-        self._transcript = text
+        if text == self._committed_disp and not self._tail_disp:
+            return
+        self._committed_disp = text
+        self._tail_disp = ""
+        self._updateLayout()
+
+    def setTextPartsObj_(self, parts):
+        committed, tail = parts
+        if committed == self._committed_disp and tail == self._tail_disp:
+            return
+        self._committed_disp = committed or ""
+        self._tail_disp = tail or ""
         self._updateLayout()
 
     def setPowerObj_(self, p):
@@ -600,6 +606,9 @@ class OverlayPanel(NSObject):
         self.performSelectorOnMainThread_withObject_waitUntilDone_("setLevelsObj:", list(lvl), False)
     def push_text(self, text):
         self.performSelectorOnMainThread_withObject_waitUntilDone_("setTextObj:", text, False)
+    def push_text_parts(self, committed, tail):
+        self.performSelectorOnMainThread_withObject_waitUntilDone_(
+            "setTextPartsObj:", [committed, tail], False)
     def show_async(self):
         self.performSelectorOnMainThread_withObject_waitUntilDone_("show", None, False)
     def hide_async(self):

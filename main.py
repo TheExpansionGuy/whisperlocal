@@ -13,7 +13,7 @@ import numpy as np
 import pyperclip
 import rumps
 import sounddevice as sd
-from AppKit import NSEvent
+from AppKit import NSEvent, NSSound
 from PyObjCTools import AppHelper
 from pynput import keyboard
 
@@ -23,7 +23,7 @@ from pynput import keyboard
 
 CONFIG_PATH = Path.home() / ".whisperlocal" / "config.json"
 DEFAULTS = {"model": "mlx-community/whisper-small.en-mlx", "filler_removal": True,
-            "llm_cleanup": False, "low_power": False, "history": []}
+            "llm_cleanup": False, "low_power": False, "sounds": True, "history": []}
 
 LOW_POWER_MODEL = "mlx-community/whisper-base.en-mlx"  # lighter model when low-power on
 HISTORY_MAX = 10
@@ -236,6 +236,10 @@ class WhisperLocal(rumps.App):
         lp_item.state = int(self.cfg.get("low_power", False))
         self.menu.add(lp_item)
 
+        snd_item = rumps.MenuItem("Sounds", callback=self._toggle_sounds)
+        snd_item.state = int(self.cfg.get("sounds", True))
+        self.menu.add(snd_item)
+
         self.menu.add(rumps.separator)
         self.menu.add(rumps.MenuItem("Check Accessibility…", callback=self._open_accessibility))
         self._status_item = rumps.MenuItem("Listener: starting…")
@@ -323,6 +327,27 @@ class WhisperLocal(rumps.App):
         # Model changes with low-power, so restart the worker
         self._model_ready = False
         threading.Thread(target=self._load_model, daemon=True).start()
+
+    def _toggle_sounds(self, sender):
+        self.cfg["sounds"] = not self.cfg.get("sounds", True)
+        sender.state = int(self.cfg["sounds"])
+        save_config(self.cfg)
+        if self.cfg["sounds"]:
+            self._play_sound("Tink")
+
+    def _play_sound(self, name: str):
+        if not self.cfg.get("sounds", True):
+            return
+        def _go():
+            try:
+                snd = NSSound.alloc().initWithContentsOfFile_byReference_(
+                    f"/System/Library/Sounds/{name}.aiff", True)
+                if snd:
+                    snd.setVolume_(0.35)
+                    snd.play()
+            except Exception:
+                pass
+        AppHelper.callAfter(_go)
 
     def _effective_model(self) -> str:
         return LOW_POWER_MODEL if self.cfg.get("low_power", False) else self.cfg["model"]
@@ -567,6 +592,7 @@ class WhisperLocal(rumps.App):
         self.audio_chunks = []
         WAVEFORM_WINDOW.extend([0.02] * WAVEFORM_BINS)
         self._set_state("recording")
+        self._play_sound("Tink")        # soft start cue
         self._overlay.show_async()
         self._overlay.push_state("recording")
         self.stream = sd.InputStream(
@@ -732,12 +758,10 @@ class WhisperLocal(rumps.App):
             else:
                 self._prev_words = new_norm
 
-            # Live display = committed + the current (unconfirmed) tail guess
+            # Live display: committed (solid) + settling tail (shimmer)
             tail_guess = " ".join(wd["w"] for wd in words[agree:]).strip()
-            display = _collapse_repeats(
-                (self._committed_text + " " + tail_guess).strip())
-            if display:
-                self._overlay.push_text(display)
+            committed_disp = _collapse_repeats(self._committed_text.strip())
+            self._overlay.push_text_parts(committed_disp, tail_guess)
         except Exception as e:
             print(f"Chunk error: {e}")
         finally:
@@ -786,8 +810,9 @@ class WhisperLocal(rumps.App):
             self._overlay.push_text(final)
             self._add_history(final)
             self._paste(final + " ")   # trailing space so consecutive dictations don't collide
-            # Satisfying completion flourish — green check, brief
+            # Satisfying completion flourish — green check + soft chime
             self._overlay.push_state("done")
+            self._play_sound("Glass")
             time.sleep(0.45)
         except Exception as e:
             print(f"Final paste error: {e}")
