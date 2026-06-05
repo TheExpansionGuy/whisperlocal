@@ -920,8 +920,9 @@ class WhisperLocal(rumps.App):
 
     def _present_review(self, final):
         """Show the editable confirm field (main thread)."""
-        self._editor.presentText_onSubmit_onCancel_(
-            final, self._on_review_submit, self._on_review_cancel)
+        self._editor._on_submit = self._on_review_submit
+        self._editor._on_cancel = self._on_review_cancel
+        self._editor.presentText_(final)
 
     def _on_review_submit(self, edited):
         final = (edited or "").strip()

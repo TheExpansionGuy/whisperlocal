@@ -8,7 +8,7 @@ keyboard input.
 import objc
 from AppKit import (
     NSPanel, NSTextView, NSScrollView, NSScreen, NSColor, NSFont, NSView,
-    NSMakeRect, NSBorderlessWindowMask, NSFocusRingTypeNone,
+    NSMakeRect, NSBorderlessWindowMask, NSFocusRingTypeNone, NSApplication,
     NSBezierPath, NSString, NSFontAttributeName, NSForegroundColorAttributeName,
 )
 from Foundation import NSObject, NSMakePoint
@@ -115,11 +115,11 @@ class ReviewEditor(NSObject):
         self._tv = tv
         self._panel = panel
 
-    def presentText_onSubmit_onCancel_(self, text, on_submit, on_cancel):
+    def presentText_(self, text):
+        # Callbacks are set as plain Python attributes by the caller
+        # (passing Python callables through an ObjC selector mangles them).
         if self._panel is None:
             self._setup()
-        self._on_submit = on_submit
-        self._on_cancel = on_cancel
         self._tv.setString_(text or "")
 
         # Size to content
@@ -133,6 +133,8 @@ class ReviewEditor(NSObject):
         self._root.layer().setFrame_(self._root.bounds())
         self._scroll.setFrame_(NSMakeRect(PAD, PAD + 16, W - PAD * 2, h - PAD * 2 - 16))
 
+        # Accessory (menu-bar) apps must activate to take keyboard focus
+        NSApplication.sharedApplication().activateIgnoringOtherApps_(True)
         self._panel.makeKeyAndOrderFront_(None)
         self._panel.makeFirstResponder_(self._tv)
         # Select all so the user can immediately retype if they want
@@ -141,10 +143,13 @@ class ReviewEditor(NSObject):
     def submit(self):
         txt = self._tv.string()
         self._panel.orderOut_(None)
+        # Hand focus back to the previously-active app before pasting
+        NSApplication.sharedApplication().deactivate()
         if self._on_submit:
             self._on_submit(txt)
 
     def cancel(self):
         self._panel.orderOut_(None)
+        NSApplication.sharedApplication().deactivate()
         if self._on_cancel:
             self._on_cancel()
