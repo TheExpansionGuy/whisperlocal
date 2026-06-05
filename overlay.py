@@ -486,7 +486,10 @@ class OverlayPanel(NSObject):
         if self._canvas: self._canvas.setLevels_(lvl)
 
     def setTextObj_(self, text):
-        self._transcript = text or ""
+        text = text or ""
+        if text == self._transcript:
+            return  # no change — skip relayout/animation
+        self._transcript = text
         self._updateLayout()
 
     # -- thread-safe wrappers ------------------------------------------

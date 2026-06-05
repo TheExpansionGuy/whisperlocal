@@ -263,6 +263,11 @@ class WhisperLocal(rumps.App):
         ])
 
     def _quit(self, _):
+        try:
+            if hasattr(self, "_worker") and self._worker.poll() is None:
+                self._worker.terminate()
+        except Exception:
+            pass
         rumps.quit_application()
 
     # ------------------------------------------------------------------
@@ -494,41 +499,39 @@ class WhisperLocal(rumps.App):
         self._partial_timer.start()
 
     def _process_chunk(self):
-        """Transcribe audio that's accumulated since the last committed offset."""
+        """Re-transcribe ALL audio so far and REPLACE the live text (no append, no prompt).
+        This avoids Whisper repetition/echo that plagues chunk-and-append streaming."""
         if not self._model_lock.acquire(blocking=False):
             return  # a transcription is already in flight; skip this tick
         try:
             if not self.audio_chunks:
                 return
             audio = np.concatenate(self.audio_chunks).flatten()
-            new_audio = audio[self._chunk_offset:]
-            # Wait until enough new audio has built up
-            if len(new_audio) < int(SAMPLE_RATE * 1.0):
+            if len(audio) < int(SAMPLE_RATE * 0.6):
                 return
-            text = self._run_transcription(new_audio, self._accumulated)
-            self._chunk_offset = len(audio)
-            if text:
-                self._accumulated = (self._accumulated + " " + text).strip()
-                self._overlay.push_text(self._accumulated)
+            text = self._run_transcription(audio)
+            if text and text != self._accumulated:
+                self._accumulated = text
+                self._overlay.push_text(text)
         except Exception as e:
             print(f"Chunk error: {e}")
         finally:
             self._model_lock.release()
 
     def _transcribe_final(self):
-        """On release: transcribe any remaining tail, then paste the full transcript."""
+        """On release: one final full-audio pass, then paste."""
         try:
             if self._cancelled:
                 return
             with self._model_lock:
-                if self.audio_chunks:
-                    audio = np.concatenate(self.audio_chunks).flatten()
-                    tail = audio[self._chunk_offset:]
-                    if len(tail) >= int(SAMPLE_RATE * 0.2):
-                        text = self._run_transcription(tail, self._accumulated)
-                        if text:
-                            self._accumulated = (self._accumulated + " " + text).strip()
-                    self._chunk_offset = len(audio)
+                if not self.audio_chunks:
+                    return
+                audio = np.concatenate(self.audio_chunks).flatten()
+                if len(audio) < int(SAMPLE_RATE * 0.3):
+                    return
+                text = self._run_transcription(audio)
+                if text:
+                    self._accumulated = text
 
             final = self._accumulated.strip()
             if self.cfg["filler_removal"]:
