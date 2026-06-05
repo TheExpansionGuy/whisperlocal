@@ -16,6 +16,14 @@ import sounddevice as sd
 from AppKit import NSEvent, NSSound
 from PyObjCTools import AppHelper
 
+# Ensure our bundled Resources dir is importable (for trainer.py)
+if getattr(sys, "frozen", False):
+    _res = Path(sys.executable).parent.parent / "Resources"
+    if str(_res) not in sys.path:
+        sys.path.insert(0, str(_res))
+else:
+    sys.path.insert(0, str(Path(__file__).parent))
+
 import trainer
 from pynput import keyboard
 
