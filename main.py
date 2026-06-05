@@ -70,6 +70,22 @@ def _collapse_repeats(text: str) -> str:
     return " ".join(out)
 
 
+def _norm_word(w: str) -> str:
+    """Normalize a word for agreement comparison (lowercase, strip punctuation)."""
+    return re.sub(r"[^\w']", "", w).lower()
+
+
+def _common_prefix_len(a, b) -> int:
+    """Length of the longest matching prefix of two normalized word lists."""
+    n = 0
+    for wa, wb in zip(a, b):
+        if wa == wb:
+            n += 1
+        else:
+            break
+    return n
+
+
 def load_config() -> dict:
     try:
         data = json.loads(CONFIG_PATH.read_text())
@@ -109,6 +125,7 @@ class WhisperLocal(rumps.App):
         self._model_ready     = False
         self._committed_text  = ""   # settled transcript, no longer re-transcribed
         self._committed_samples = 0  # audio samples already finalized
+        self._prev_words      = []   # last tick's uncommitted hypothesis (normalized)
 
         # Overlay (AppKit panel — created lazily on main thread)
         from overlay import OverlayPanel
@@ -348,22 +365,24 @@ class WhisperLocal(rumps.App):
         """Return plain text only."""
         return self._run_transcription_full(audio, prompt).get("text", "")
 
-    def _run_transcription_full(self, audio: np.ndarray, prompt: str = "") -> dict:
-        """Send audio to worker, return {'text', 'segments'}."""
+    def _run_transcription_full(self, audio: np.ndarray, prompt: str = "",
+                                words: bool = False) -> dict:
+        """Send audio to worker, return {'text', optionally 'words'}."""
         if not hasattr(self, "_worker") or self._worker.poll() is not None:
-            return {"text": "", "segments": []}
+            return {"text": "", "words": []}
         try:
             data = audio.tobytes()
-            header = json.dumps({"n": len(data), "prompt": prompt[-200:]}).encode()
+            header = json.dumps(
+                {"n": len(data), "prompt": prompt[-200:], "words": words}).encode()
             self._worker.stdin.write(header + b"\n" + data)
             self._worker.stdin.flush()
             line = self._worker.stdout.readline()
             if not line.strip():
-                return {"text": "", "segments": []}
+                return {"text": "", "words": []}
             return json.loads(line.strip())
         except Exception as e:
             print(f"Transcription error: {e}")
-            return {"text": "", "segments": []}
+            return {"text": "", "words": []}
 
     # ------------------------------------------------------------------
     # Hotkey listener
@@ -413,6 +432,7 @@ class WhisperLocal(rumps.App):
         self._cancelled         = False
         self._committed_text    = ""
         self._committed_samples = 0
+        self._prev_words        = []
         self._target_element, self._target_app = self._snapshot_focus()
         self.recording    = True
         self.audio_chunks = []
@@ -518,8 +538,9 @@ class WhisperLocal(rumps.App):
         self._partial_timer.start()
 
     def _process_chunk(self):
-        """Re-transcribe only the unsettled tail. Commit segments that have stopped moving,
-        so we never reprocess settled audio — fast, and no repetition."""
+        """LocalAgreement-2: commit only words that two consecutive runs agree on.
+        A word is locked in when the model produces it identically twice — far more
+        robust than committing on a timer (self-correcting, repetition-resistant)."""
         if not self._model_lock.acquire(blocking=False):
             return  # a transcription is already in flight; skip this tick
         try:
@@ -531,36 +552,36 @@ class WhisperLocal(rumps.App):
             if tail_dur < 0.6:
                 return
 
-            result = self._run_transcription_full(tail, self._committed_text)
-            segs = result.get("segments", [])
+            result = self._run_transcription_full(
+                tail, self._committed_text, words=True)
+            words = result.get("words", [])
+            if not words:
+                return
 
-            settle_edge = tail_dur - SETTLE_MARGIN
-            commit_until = 0.0
-            committed_now = []
-            unsettled = []
-            for seg in segs:
-                if seg["end"] <= settle_edge:
-                    committed_now.append(seg["text"])
-                    commit_until = seg["end"]
-                else:
-                    unsettled.append(seg["text"])
+            new_norm = [_norm_word(wd["w"]) for wd in words]
 
-            # Bound latency: if the tail has grown past MAX_TAIL_SECS but nothing
-            # settled normally, force-commit all but the final segment so we make
-            # forward progress and never re-transcribe an ever-growing chunk.
-            if not committed_now and tail_dur > MAX_TAIL_SECS and len(segs) >= 2:
-                committed_now = [s["text"] for s in segs[:-1]]
-                commit_until  = segs[-2]["end"]
-                unsettled     = [segs[-1]["text"]]
+            # Agreement = longest common prefix with the previous hypothesis
+            agree = _common_prefix_len(self._prev_words, new_norm)
 
-            if committed_now:
+            # Don't commit a word still within SETTLE_MARGIN of the live edge
+            # (it may still be mid-utterance even if it matched).
+            while agree > 0 and words[agree - 1]["end"] > tail_dur - SETTLE_MARGIN:
+                agree -= 1
+
+            if agree > 0:
+                committed = " ".join(wd["w"] for wd in words[:agree]).strip()
                 self._committed_text = _collapse_repeats(
-                    (self._committed_text + " " + " ".join(committed_now)).strip())
-                self._committed_samples += int(commit_until * SAMPLE_RATE)
+                    (self._committed_text + " " + committed).strip())
+                self._committed_samples += int(words[agree - 1]["end"] * SAMPLE_RATE)
+                # Remaining hypothesis is now relative to the new committed point
+                self._prev_words = new_norm[agree:]
+            else:
+                self._prev_words = new_norm
 
-            # Live display = committed text + still-settling tail
+            # Live display = committed + the current (unconfirmed) tail guess
+            tail_guess = " ".join(wd["w"] for wd in words[agree:]).strip()
             display = _collapse_repeats(
-                (self._committed_text + " " + " ".join(unsettled)).strip())
+                (self._committed_text + " " + tail_guess).strip())
             if display:
                 self._overlay.push_text(display)
         except Exception as e:

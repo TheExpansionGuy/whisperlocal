@@ -43,25 +43,34 @@ def main():
             header  = json.loads(header_line.decode())
             n_bytes = header["n"]
             prompt  = header.get("prompt", "")
+            words_wanted = header.get("words", False)
             data    = sys.stdin.buffer.read(n_bytes)
             audio   = np.frombuffer(data, dtype=np.float32)
 
             kwargs = dict(path_or_hf_repo=model, language=lang, verbose=False)
             if prompt:
                 kwargs["initial_prompt"] = prompt
+            if words_wanted:
+                kwargs["word_timestamps"] = True
 
             result = mlx_whisper.transcribe(audio, **kwargs)
             text   = result.get("text", "").strip()
-            segs   = [
-                {"start": s.get("start", 0.0),
-                 "end":   s.get("end", 0.0),
-                 "text":  s.get("text", "").strip()}
-                for s in result.get("segments", [])
-            ]
-            sys.stdout.write(json.dumps({"text": text, "segments": segs}) + "\n")
+            out    = {"text": text}
+
+            if words_wanted:
+                words = []
+                for seg in result.get("segments", []):
+                    for wd in seg.get("words", []):
+                        words.append({
+                            "w":   wd.get("word", "").strip(),
+                            "end": wd.get("end", 0.0),
+                        })
+                out["words"] = words
+
+            sys.stdout.write(json.dumps(out) + "\n")
             sys.stdout.flush()
         except Exception as e:
-            sys.stdout.write(json.dumps({"text": ""}) + "\n")
+            sys.stdout.write(json.dumps({"text": "", "words": []}) + "\n")
             sys.stdout.flush()
             print(f"chunk error: {e}", file=sys.stderr)
 
