@@ -389,7 +389,7 @@ class WhisperLocal(rumps.App):
                 snd = NSSound.alloc().initWithContentsOfFile_byReference_(
                     f"/System/Library/Sounds/{name}.aiff", True)
                 if snd:
-                    snd.setVolume_(0.35)
+                    snd.setVolume_(0.22)
                     snd.play()
             except Exception:
                 pass
@@ -806,7 +806,7 @@ class WhisperLocal(rumps.App):
                 self._prev_words = new_norm
 
             # Live display: committed (solid) + settling tail (shimmer)
-            tail_guess = " ".join(wd["w"] for wd in words[agree:]).strip()
+            tail_guess = _collapse_repeats(" ".join(wd["w"] for wd in words[agree:]).strip())
             committed_disp = _collapse_repeats(self._committed_text.strip())
             self._overlay.push_text_parts(committed_disp, tail_guess)
         except Exception as e:
@@ -860,7 +860,7 @@ class WhisperLocal(rumps.App):
             self._paste(final + " ")   # trailing space so consecutive dictations don't collide
             # Satisfying completion flourish — green check + soft chime
             self._overlay.push_state("done")
-            self._play_sound("Glass")
+            self._play_sound("Pop")   # subtle completion tap
             time.sleep(0.45)
         except Exception as e:
             print(f"Final paste error: {e}")

@@ -16,16 +16,16 @@ from Foundation import NSMakePoint, NSObject, NSTimer, NSString
 # ---------------------------------------------------------------------------
 # Layout
 # ---------------------------------------------------------------------------
-PANEL_W_COMPACT = 380    # controls-only width (idle / recording, no text yet)
-PANEL_W_WIDE    = 560    # widened when showing transcript
+PANEL_W_COMPACT = 290    # controls-only width (idle / recording, no text yet)
+PANEL_W_WIDE    = 540    # max width when showing transcript
 PANEL_W         = PANEL_W_WIDE   # max width (used to size the window once)
-PILL_H     = 46
+PILL_H     = 38
 MAX_LINES  = 6
 LINE_H     = 20
-TX_PAD_V   = 12
-TX_PAD_H   = 24
+TX_PAD_V   = 11
+TX_PAD_H   = 22
 BOTTOM     = 64
-CORNER     = 23.0
+CORNER     = 19.0
 FPS        = 30
 
 _FLOAT   = 3
@@ -43,18 +43,18 @@ DIM     = _c(0.48, 0.48, 0.52, 1.0)
 DIVIDER = _c(1.00, 1.00, 1.00, 0.07)
 RING    = _c(1.00, 1.00, 1.00, 0.10)
 
-PAD   = 16
-IND_W = 20
-TMR_W = 92   # holds timer + live CPU%
-LBL_W = 76
+PAD   = 14
+IND_W = 18
+TMR_W = 40   # timer only
+LBL_W = 66
 
 def _layout(w):
     """Compute control-strip x-positions for a given panel width."""
     ind_x = PAD
     tmr_x = w - PAD - TMR_W
-    lbl_x = tmr_x - LBL_W - 4
-    wav_x = ind_x + IND_W + 10
-    wav_w = lbl_x - wav_x - 6
+    lbl_x = tmr_x - LBL_W - 2
+    wav_x = ind_x + IND_W + 8
+    wav_w = lbl_x - wav_x - 4
     return ind_x, wav_x, wav_w, lbl_x, tmr_x
 
 # Animation constants
@@ -201,7 +201,7 @@ class _PillCanvas(NSView):
         ind_x += pill_x; wav_x += pill_x; lbl_x += pill_x; tmr_x += pill_x
 
         self._draw_indicator(ind_x + IND_W / 2, PILL_H / 2)
-        self._draw_waveform(NSMakeRect(wav_x, (PILL_H - 26) / 2, wav_w, 26))
+        self._draw_waveform(NSMakeRect(wav_x, (PILL_H - 22) / 2, wav_w, 22))
 
         state_label = {"recording": "Listening",
                        "transcribing": "Transcribing",
@@ -484,17 +484,20 @@ class OverlayPanel(NSObject):
         combined = (self._committed_disp + " " + self._tail_disp).strip()
         words = combined.split() if combined else []
 
-        # Window is always at least the compact pill width; widens for transcript.
-        panel_w = PANEL_W_WIDE if words else PANEL_W_COMPACT
-
         if not words:
+            panel_w = PANEL_W_COMPACT
             text_h = 0
         else:
-            max_w = PANEL_W_WIDE - TX_PAD_H * 2
             attrs = {NSFontAttributeName: _FONT_TX}
+            word_w = [NSString.stringWithString_(w + " ").sizeWithAttributes_(attrs).width
+                      for w in words]
+            single_line = sum(word_w)
+            # Grow width with content: from compact up to the wide maximum
+            panel_w = max(PANEL_W_COMPACT,
+                          min(PANEL_W_WIDE, single_line + TX_PAD_H * 2))
+            max_w = panel_w - TX_PAD_H * 2
             lines = 1; cur_w = 0.0
-            for word in words:
-                wd = NSString.stringWithString_(word + " ").sizeWithAttributes_(attrs).width
+            for wd in word_w:
                 if cur_w + wd > max_w and cur_w > 0:
                     lines += 1; cur_w = wd
                 else:
@@ -530,14 +533,10 @@ class OverlayPanel(NSObject):
         if not self._canvas:
             return
         self._canvas.setPhase_(self._anim_phase)
-        # Right-side text: timer while recording + live CPU% always
-        parts = []
+        # Right-side text: just the recording timer (CPU% lives in the menu)
         if self._state == "recording":
             e = time.time() - self._record_start
-            parts.append(f"{int(e//60)}:{int(e%60):02d}")
-        if self._power:
-            parts.append(self._power)
-        self._canvas.setTimer_("  ".join(parts))
+            self._canvas.setTimer_(f"{int(e//60)}:{int(e%60):02d}")
 
     # -- main thread selectors ------------------------------------------
 
