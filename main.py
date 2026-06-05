@@ -55,7 +55,19 @@ WAVEFORM_WINDOW = collections.deque([0.02] * WAVEFORM_BINS, maxlen=WAVEFORM_BINS
 
 CHUNK_INTERVAL  = 1.2   # how often to re-transcribe the live tail
 SETTLE_MARGIN   = 1.0   # a segment is "settled" once it ends this many secs before the live edge
+MAX_TAIL_SECS   = 8.0   # force-commit if the unsettled tail grows beyond this (bounds latency)
 MAX_RECORD_SECS = 300
+
+
+def _collapse_repeats(text: str) -> str:
+    """Collapse runs of 3+ identical consecutive words to a single one.
+    Guards against Whisper's repetition hallucination ('the the the the')."""
+    out = []
+    for w in text.split():
+        if len(out) >= 2 and out[-1].lower() == w.lower() == out[-2].lower():
+            continue
+        out.append(w)
+    return " ".join(out)
 
 
 def load_config() -> dict:
@@ -522,24 +534,33 @@ class WhisperLocal(rumps.App):
             result = self._run_transcription_full(tail, self._committed_text)
             segs = result.get("segments", [])
 
-            # Commit segments that end safely before the live edge
+            settle_edge = tail_dur - SETTLE_MARGIN
             commit_until = 0.0
             committed_now = []
             unsettled = []
             for seg in segs:
-                if seg["end"] <= tail_dur - SETTLE_MARGIN:
+                if seg["end"] <= settle_edge:
                     committed_now.append(seg["text"])
                     commit_until = seg["end"]
                 else:
                     unsettled.append(seg["text"])
 
+            # Bound latency: if the tail has grown past MAX_TAIL_SECS but nothing
+            # settled normally, force-commit all but the final segment so we make
+            # forward progress and never re-transcribe an ever-growing chunk.
+            if not committed_now and tail_dur > MAX_TAIL_SECS and len(segs) >= 2:
+                committed_now = [s["text"] for s in segs[:-1]]
+                commit_until  = segs[-2]["end"]
+                unsettled     = [segs[-1]["text"]]
+
             if committed_now:
-                self._committed_text = (
-                    self._committed_text + " " + " ".join(committed_now)).strip()
+                self._committed_text = _collapse_repeats(
+                    (self._committed_text + " " + " ".join(committed_now)).strip())
                 self._committed_samples += int(commit_until * SAMPLE_RATE)
 
             # Live display = committed text + still-settling tail
-            display = (self._committed_text + " " + " ".join(unsettled)).strip()
+            display = _collapse_repeats(
+                (self._committed_text + " " + " ".join(unsettled)).strip())
             if display:
                 self._overlay.push_text(display)
         except Exception as e:
@@ -562,7 +583,7 @@ class WhisperLocal(rumps.App):
                         if text:
                             final = (self._committed_text + " " + text).strip()
 
-            final = final.strip()
+            final = _collapse_repeats(final.strip())
             if self.cfg["filler_removal"]:
                 final = FILLER_RE.sub("", final).strip()
             if not final:
