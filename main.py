@@ -763,8 +763,12 @@ class WhisperLocal(rumps.App):
         self._play_sound("Tink")        # soft start cue
         self._overlay.show_async()
         self._overlay.push_state("recording")
+        # Open the mic OFF the main thread — PortAudio open/close can block, and
+        # blocking the main thread freezes the overlay + menu bar.
+        threading.Thread(target=self._begin_capture, daemon=True).start()
+
+    def _begin_capture(self):
         if not self._open_stream():
-            # Couldn't open the mic — bail cleanly instead of recording silence
             self.recording = False
             self._overlay.push_state("idle")
             self._overlay.hide_async()
@@ -772,8 +776,21 @@ class WhisperLocal(rumps.App):
             rumps.notification("WhisperLocal", "No microphone",
                                "Couldn't access a mic. Check it's connected.", sound=False)
             return
+        if not self.recording:          # released already (quick tap) — clean up
+            self._close_stream()
+            return
         self._start_partial_timer()
         self._start_timeout()
+
+    def _close_stream(self):
+        """Stop+close the audio stream. MUST run off the main thread (can block)."""
+        s = self.stream
+        self.stream = None
+        if s:
+            try:
+                s.stop(); s.close()
+            except Exception:
+                pass
 
     def _open_stream(self) -> bool:
         """Open the mic stream, refreshing the audio device list first so a
@@ -803,13 +820,10 @@ class WhisperLocal(rumps.App):
         self._stop_timeout()
         self.recording = False
         self._stop_partial_timer()
-        if self.stream:
-            self.stream.stop()
-            self.stream.close()
-            self.stream = None
         self._transcribing = True
         self._set_state("transcribing")
         self._overlay.push_state("transcribing")
+        # Stream close + transcription both happen off the main thread.
         threading.Thread(target=self._transcribe_final, daemon=True).start()
 
     def _is_hotkey(self, key):
@@ -823,13 +837,7 @@ class WhisperLocal(rumps.App):
         self._stop_timeout()
         self._stop_partial_timer()
         self.recording = False
-        if self.stream:
-            try:
-                self.stream.stop()
-                self.stream.close()
-            except Exception:
-                pass
-            self.stream = None
+        threading.Thread(target=self._close_stream, daemon=True).start()  # off main thread
         self.audio_chunks = []
         self._transcribing = False
         self._overlay.push_state("idle")
@@ -962,6 +970,7 @@ class WhisperLocal(rumps.App):
         """On release: transcribe the remaining tail, append, optionally clean up, paste.
         Paste is bulletproof — any error in transcription/cleanup still pastes what we have."""
         try:
+            self._close_stream()   # stop the mic off the main thread
             if self._cancelled:
                 return
 
