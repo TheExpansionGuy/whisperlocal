@@ -563,11 +563,19 @@ class WhisperLocal(rumps.App):
         if hasattr(self, "_status_item"):
             AppHelper.callAfter(lambda: setattr(self._status_item, "title", text))
 
-    def _venv_python(self) -> str:
+    def _bundle_pylib(self) -> str:
+        """Path to the embedded ML deps inside the app bundle (self-contained)."""
         if getattr(sys, "frozen", False):
-            txt = Path(sys.executable).parent.parent / "Resources" / "venv_python.txt"
-            if txt.exists():
-                return txt.read_text().strip()
+            return str(Path(sys.executable).parent.parent / "Resources" / "pylib")
+        return ""
+
+    def _venv_python(self) -> str:
+        """Interpreter for the worker. In the bundle, use the app's OWN python
+        (Contents/MacOS/python) so we depend on nothing outside the .app."""
+        if getattr(sys, "frozen", False):
+            bundled = Path(sys.executable).parent / "python"   # Contents/MacOS/python
+            if bundled.exists():
+                return str(bundled)
         return sys.executable
 
     def _worker_script(self) -> str:
@@ -577,13 +585,17 @@ class WhisperLocal(rumps.App):
 
     def _worker_env(self) -> dict:
         venv_python = self._venv_python()
-        return {
+        env = {
             "HOME":   str(Path.home()),
             "USER":   os.environ.get("USER", ""),
             "TMPDIR": os.environ.get("TMPDIR", "/tmp"),
             "PATH":   f"{Path(venv_python).parent}:/usr/bin:/bin:/usr/local/bin",
             "LANG":   "en_US.UTF-8",
         }
+        pylib = self._bundle_pylib()
+        if pylib and Path(pylib).exists():
+            env["PYTHONPATH"] = pylib   # embedded mlx/mlx_whisper/etc.
+        return env
 
     def _load_model(self):
         """Start persistent worker — stays alive between transcriptions."""
