@@ -768,6 +768,12 @@ class WhisperLocal(rumps.App):
         threading.Thread(target=self._begin_capture, daemon=True).start()
 
     def _begin_capture(self):
+        # Refresh PortAudio's device list every time so device changes (unplug /
+        # switch / sleep) are always picked up. Safe here — it's a worker thread.
+        try:
+            sd._terminate(); sd._initialize()
+        except Exception as e:
+            print(f"audio reinit: {e}")
         if not self._open_stream():
             self.recording = False
             self._overlay.push_state("idle")
