@@ -1032,23 +1032,26 @@ class WhisperLocal(rumps.App):
         final = final.strip()
         if not final:
             return
-        self._add_history(final)
-        self._last_output = final
-
-        # Paste (optionally after a beat so focus has returned to the target app)
+        # Paste FIRST so nothing downstream can ever block it.
         if paste_delay > 0:
             threading.Timer(paste_delay, lambda: self._paste(final + " ")).start()
         else:
             self._paste(final + " ")
         if play:
             self._play_sound("Pop")
+        self._last_output = final
+        try:
+            self._add_history(final)
+        except Exception as e:
+            print(f"history error: {e}")
 
     def _add_history(self, text: str):
         history = self.cfg.setdefault("history", [])
         history.append(text)
         self.cfg["history"] = history[-HISTORY_MAX:]
         save_config(self.cfg)
-        self._refresh_history_menu()
+        if hasattr(self, "_history_menu"):   # minimal build has no Recent menu
+            self._refresh_history_menu()
 
     # ------------------------------------------------------------------
     # Text injection
