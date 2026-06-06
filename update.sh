@@ -37,7 +37,10 @@ fi
 find "$RES" -name "overlay*.pyc" -not -path "*/lib/*" -delete 2>/dev/null || true
 
 echo "▸ Restarting WhisperLocal..."
-pkill -x WhisperLocal 2>/dev/null || true
-sleep 0.5
+pkill -9 -x WhisperLocal 2>/dev/null || true
+pkill -9 -f transcribe_worker 2>/dev/null || true
+sleep 1
+# Ensure no stragglers before relaunching (duplicate instances fight over the hotkey)
+while pgrep -x WhisperLocal >/dev/null; do sleep 0.3; done
 open "$APP"
 echo "✓ Done"

@@ -1085,19 +1085,23 @@ class WhisperLocal(rumps.App):
             return None, None
 
     def _paste(self, text: str):
-        """Paste via clipboard + ⌘V. Fully thread-safe: pyperclip uses pbcopy,
-        pynput uses Quartz events — neither touches AppKit, so this is safe to
-        call from the transcription background thread without segfaulting.
-        Our overlay is a non-activating panel, so the target field keeps focus."""
-        prev = pyperclip.paste()
+        """Insert text by typing it directly (no clipboard touched).
+        Falls back to clipboard+⌘V if typing fails."""
         try:
+            self._kb.type(text)
+            return
+        except Exception as e:
+            print(f"type failed ({e}); falling back to clipboard")
+        try:
+            prev = pyperclip.paste()
             pyperclip.copy(text)
             time.sleep(0.05)
             with self._kb.pressed(keyboard.Key.cmd):
                 self._kb.tap("v")
-            time.sleep(0.1)
-        finally:
+            time.sleep(0.2)
             pyperclip.copy(prev)
+        except Exception as e:
+            print(f"clipboard fallback failed: {e}")
 
 
 if __name__ == "__main__":
