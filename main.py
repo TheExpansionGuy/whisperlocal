@@ -246,6 +246,9 @@ class WhisperLocal(rumps.App):
             self._status_item.set_callback(None)
             self.menu.add(self._status_item)
             self.menu.add(rumps.separator)
+            self._history_menu = rumps.MenuItem("Recent (click to copy)")
+            self._populate_history(self._history_menu)
+            self.menu.add(self._history_menu)
             filler_item = rumps.MenuItem("Remove Filler Words", callback=self._toggle_filler)
             filler_item.state = int(self.cfg["filler_removal"])
             self.menu.add(filler_item)
@@ -977,6 +980,14 @@ class WhisperLocal(rumps.App):
         Paste is bulletproof — any error in transcription/cleanup still pastes what we have."""
         try:
             self._close_stream()   # stop the mic off the main thread
+            try:
+                n = len(self.audio_chunks)
+                samples = sum(len(c) for c in self.audio_chunks) if self.audio_chunks else 0
+                with open(Path.home()/".whisperlocal"/"debug.log","a") as f:
+                    f.write(f"[final] chunks={n} samples={samples} "
+                            f"secs={samples/SAMPLE_RATE:.2f}\n")
+            except Exception:
+                pass
             if self._cancelled:
                 return
 
