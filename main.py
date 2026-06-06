@@ -32,6 +32,11 @@ from pynput import keyboard
 # Config
 # ---------------------------------------------------------------------------
 
+# Minimal consumer build: hides experimental features (review mode, LLM cleanup,
+# personalization/voice-training, low-power, model/mic pickers). The full
+# experience lives on the 'experimental' git branch. Flip to False to re-enable.
+MINIMAL = True
+
 CONFIG_PATH = Path.home() / ".whisperlocal" / "config.json"
 DEFAULTS = {"model": "mlx-community/whisper-small.en-mlx", "filler_removal": True,
             "llm_cleanup": False, "low_power": False, "sounds": True,
@@ -158,6 +163,10 @@ class WhisperLocal(rumps.App):
         self.icon = ICON_IDLE
         self.template = True
         self.cfg = load_config()
+        if MINIMAL:
+            # Force experimental features off for the minimal build
+            for k in ("review", "llm_cleanup", "low_power", "personalize"):
+                self.cfg[k] = False
         self.model = None
         self.recording = False
         self.audio_chunks = []
@@ -231,6 +240,19 @@ class WhisperLocal(rumps.App):
 
     def _build_menu(self):
         self.menu.clear()
+
+        if MINIMAL:
+            self._status_item = rumps.MenuItem("Starting…")
+            self._status_item.set_callback(None)
+            self.menu.add(self._status_item)
+            self.menu.add(rumps.separator)
+            filler_item = rumps.MenuItem("Remove Filler Words", callback=self._toggle_filler)
+            filler_item.state = int(self.cfg["filler_removal"])
+            self.menu.add(filler_item)
+            self.menu.add(rumps.MenuItem("Check Accessibility…", callback=self._open_accessibility))
+            self.menu.add(rumps.separator)
+            self.menu.add(rumps.MenuItem("Quit", callback=self._quit))
+            return
 
         self._history_menu = rumps.MenuItem("Recent")
         self._populate_history(self._history_menu)
