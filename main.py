@@ -763,16 +763,39 @@ class WhisperLocal(rumps.App):
         self._play_sound("Tink")        # soft start cue
         self._overlay.show_async()
         self._overlay.push_state("recording")
-        self.stream = sd.InputStream(
-            device=self.cfg.get("input_device"),
-            samplerate=SAMPLE_RATE,
-            channels=1,
-            dtype="float32",
-            callback=self._audio_cb,
-        )
-        self.stream.start()
+        if not self._open_stream():
+            # Couldn't open the mic — bail cleanly instead of recording silence
+            self.recording = False
+            self._overlay.push_state("idle")
+            self._overlay.hide_async()
+            self._set_state("idle")
+            rumps.notification("WhisperLocal", "No microphone",
+                               "Couldn't access a mic. Check it's connected.", sound=False)
+            return
         self._start_partial_timer()
         self._start_timeout()
+
+    def _open_stream(self) -> bool:
+        """Open the mic stream, refreshing the audio device list first so a
+        hot-plugged / unplugged mic is picked up (PortAudio caches devices)."""
+        for attempt in (1, 2):
+            try:
+                if attempt == 2:
+                    # Refresh PortAudio's device list and retry on the default device
+                    try:
+                        sd._terminate(); sd._initialize()
+                    except Exception:
+                        pass
+                device = self.cfg.get("input_device") if attempt == 1 else None
+                self.stream = sd.InputStream(
+                    device=device, samplerate=SAMPLE_RATE, channels=1,
+                    dtype="float32", callback=self._audio_cb)
+                self.stream.start()
+                return True
+            except Exception as e:
+                print(f"mic open attempt {attempt} failed: {e}")
+                self.stream = None
+        return False
 
     def _on_release(self, key):
         if not self._is_hotkey(key) or not self.recording:
