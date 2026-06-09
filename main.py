@@ -2,6 +2,7 @@ import collections
 import json
 import os
 import re
+import select
 import subprocess
 import sys
 import threading
@@ -619,7 +620,9 @@ class WhisperLocal(rumps.App):
                     stderr=subprocess.PIPE,
                     env=self._worker_env(),
                 )
-                line = self._worker.stdout.readline().strip()
+                # Wait for READY with a generous timeout (first run downloads the model)
+                ready, _, _ = select.select([self._worker.stdout], [], [], 180)
+                line = self._worker.stdout.readline().strip() if ready else b"TIMEOUT"
             if line == b"READY":
                 self._model_ready = True
                 tag = "🔋 " if self.cfg.get("low_power", False) else ""
@@ -661,22 +664,43 @@ class WhisperLocal(rumps.App):
 
     def _run_transcription_full(self, audio: np.ndarray, prompt: str = "",
                                 words: bool = False) -> dict:
-        """Send audio to worker, return {'text', optionally 'words'}."""
-        if not hasattr(self, "_worker") or self._worker.poll() is not None:
-            return {"text": "", "words": []}
+        """Send audio to worker, return {'text', optionally 'words'}.
+        Self-healing: if the worker has died or stops responding, restart it."""
+        empty = {"text": "", "words": []}
+        if not hasattr(self, "_worker") or self._worker is None or self._worker.poll() is not None:
+            self._restart_worker_async()
+            return empty
         try:
             data = audio.tobytes()
             header = json.dumps(
                 {"n": len(data), "prompt": prompt[-200:], "words": words}).encode()
             self._worker.stdin.write(header + b"\n" + data)
             self._worker.stdin.flush()
+            # Wait for a response with a timeout — never block forever.
+            ready, _, _ = select.select([self._worker.stdout], [], [], 25)
+            if not ready:
+                print("worker unresponsive — restarting")
+                self._restart_worker_async()
+                return empty
             line = self._worker.stdout.readline()
             if not line.strip():
-                return {"text": "", "words": []}
+                return empty
             return json.loads(line.strip())
         except Exception as e:
-            print(f"Transcription error: {e}")
-            return {"text": "", "words": []}
+            print(f"Transcription error: {e}; restarting worker")
+            self._restart_worker_async()
+            return empty
+
+    def _restart_worker_async(self):
+        """Kill any wedged worker and start a fresh one (off-thread, no deadlock).
+        _load_model waits for the model lock, so it runs once the caller releases."""
+        try:
+            if hasattr(self, "_worker") and self._worker and self._worker.poll() is None:
+                self._worker.kill()
+        except Exception:
+            pass
+        self._model_ready = False
+        threading.Thread(target=self._load_model, daemon=True).start()
 
     # ------------------------------------------------------------------
     # Hotkey listener
