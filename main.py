@@ -721,21 +721,19 @@ class WhisperLocal(rumps.App):
         NSFlagsChangedMask = 1 << 12
         NSKeyDownMask      = 1 << 10
 
-        alt_was_down = [False]
         shift_was_down = [False]
 
         def flags_handler(event):
+            # Use the LIVE Option state vs our recording state as the source of
+            # truth (no separate edge boolean that can desync if an event drops).
             flags = event.modifierFlags()
             alt_now   = bool(flags & 0x00080000)  # NSAlternateKeyMask
             shift_now = bool(flags & 0x00020000)  # NSShiftKeyMask
 
-            # Right Option edge → start / stop recording
-            if alt_now and not alt_was_down[0]:
-                alt_was_down[0] = True
-                self._on_press(keyboard.Key.alt_r)
-            elif not alt_now and alt_was_down[0]:
-                alt_was_down[0] = False
-                self._on_release(keyboard.Key.alt_r)
+            if alt_now and not self.recording and not self._transcribing:
+                self._on_press(keyboard.Key.alt_r)        # start
+            elif not alt_now and self.recording:
+                self._on_release(keyboard.Key.alt_r)      # stop
 
             # Shift tap while recording → toggle pause
             if shift_now and not shift_was_down[0]:
@@ -779,11 +777,19 @@ class WhisperLocal(rumps.App):
         if key == keyboard.Key.esc:
             self._cancel()
             return
-        if self._is_hotkey(key) and (self.recording or self._transcribing):
-            self._cancel()
+        if not self._is_hotkey(key):
             return
-        if not self._is_hotkey(key) or self.recording or not self._model_ready:
+        if not self._model_ready:
             return
+        # If a recording/transcribe flag is set, decide: genuine (cancel) vs stale.
+        if self.recording or self._transcribing:
+            stale = (time.time() - getattr(self, "_active_since", 0)) > 30
+            if stale:
+                self._force_reset()      # desynced flag — recover, then start fresh
+            else:
+                self._cancel()           # genuine press-to-cancel
+                return
+        self._active_since      = time.time()
         self._cancelled         = False
         self._committed_text    = ""
         self._committed_samples = 0
@@ -804,12 +810,9 @@ class WhisperLocal(rumps.App):
         threading.Thread(target=self._begin_capture, daemon=True).start()
 
     def _begin_capture(self):
-        # Refresh PortAudio's device list every time so device changes (unplug /
-        # switch / sleep) are always picked up. Safe here — it's a worker thread.
-        try:
-            sd._terminate(); sd._initialize()
-        except Exception as e:
-            print(f"audio reinit: {e}")
+        # NOTE: we no longer reinitialize PortAudio on every recording — doing
+        # that repeatedly corrupts its state over a long session ("refuses to
+        # record"). _open_stream() refreshes devices only if the open fails.
         if not self._open_stream():
             self.recording = False
             self._overlay.push_state("idle")
@@ -821,7 +824,8 @@ class WhisperLocal(rumps.App):
         if not self.recording:          # released already (quick tap) — clean up
             self._close_stream()
             return
-        self._start_partial_timer()
+        # No live streaming — one accurate Whisper pass happens on release.
+        # (We don't display a live transcript, so streaming added only risk.)
         self._start_timeout()
 
     def _close_stream(self):
@@ -863,6 +867,7 @@ class WhisperLocal(rumps.App):
         self.recording = False
         self._stop_partial_timer()
         self._transcribing = True
+        self._active_since = time.time()
         self._set_state("transcribing")
         self._overlay.push_state("transcribing")
         # Stream close + transcription both happen off the main thread.
@@ -882,6 +887,20 @@ class WhisperLocal(rumps.App):
         threading.Thread(target=self._close_stream, daemon=True).start()  # off main thread
         self.audio_chunks = []
         self._transcribing = False
+        self._overlay.push_state("idle")
+        self._overlay.hide_async()
+        self._set_state("idle")
+
+    def _force_reset(self):
+        """Recover from desynced state (a dropped key event left a flag stuck)."""
+        self._cancelled = True
+        self._stop_timeout()
+        self._stop_partial_timer()
+        self.recording = False
+        self._transcribing = False
+        self._paused = False
+        threading.Thread(target=self._close_stream, daemon=True).start()
+        self.audio_chunks = []
         self._overlay.push_state("idle")
         self._overlay.hide_async()
         self._set_state("idle")
@@ -1035,6 +1054,11 @@ class WhisperLocal(rumps.App):
             final = _fix_spacing(final)
             if self.cfg["filler_removal"]:
                 final = FILLER_RE.sub("", final).strip()
+            try:
+                with open(Path.home()/".whisperlocal"/"debug.log","a") as f:
+                    f.write(f"[final] text='{final[:60]}'\n")
+            except Exception:
+                pass
             if not final:
                 return
 
