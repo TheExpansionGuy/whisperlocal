@@ -16,8 +16,8 @@ from Foundation import NSMakePoint, NSObject, NSTimer, NSString
 # ---------------------------------------------------------------------------
 # Layout
 # ---------------------------------------------------------------------------
-PANEL_W_COMPACT = 290    # controls-only width (idle / recording, no text yet)
-PANEL_W_WIDE    = 540    # max width when showing transcript
+PANEL_W_COMPACT = 200    # compact pill: just the waveform
+PANEL_W_WIDE    = 540    # (unused in minimal UI)
 PANEL_W         = PANEL_W_WIDE   # max width (used to size the window once)
 PILL_H     = 38
 MAX_LINES  = 6
@@ -205,9 +205,11 @@ class _PillCanvas(NSView):
         elif self._state == "done":
             self._draw_check(cx, cy)
         else:
-            # Recording / idle → waveform spanning the pill
-            self._draw_waveform(NSMakeRect(pill_x + PAD, (PILL_H - 22) / 2,
-                                           pill_w - 2 * PAD, 22))
+            # Recording / idle → waveform centred in the pill, inset to clear
+            # the rounded corners.
+            inset = 22
+            self._draw_waveform(NSMakeRect(pill_x + inset, (PILL_H - 20) / 2,
+                                           pill_w - 2 * inset, 20))
         return
 
     def _draw_processing_dots(self, cx, cy):
@@ -387,13 +389,14 @@ class _PillCanvas(NSView):
         xs  = [rect.origin.x + i * w / (n - 1) for i in range(n)]
         amp = h / 2 * 0.85
 
-        # Edge taper so lines converge to the centre at both ends
-        taper = 5
+        # Gentle edge softening — fade to ~55% at the very ends (not to a point),
+        # so the waveform keeps body across the whole pill.
+        taper = 4
         env = list(base)
         for i in range(taper):
-            t = i / taper
-            env[i] *= t
-            env[-(i + 1)] *= t
+            f = 0.55 + 0.45 * (i / taper)
+            env[i] *= f
+            env[-(i + 1)] *= f
 
         # Three overlapping stroked lines, each oscillating around the centre
         # with a different travelling phase — reads as moving lines, not a solid.
