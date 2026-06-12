@@ -42,6 +42,7 @@ WHITE   = _c(0.92, 0.92, 0.94, 1.0)
 DIM     = _c(0.48, 0.48, 0.52, 1.0)
 DIVIDER = _c(1.00, 1.00, 1.00, 0.07)
 RING    = _c(1.00, 1.00, 1.00, 0.10)
+ACCENT  = _c(0.45, 0.74, 1.00, 1.0)   # soft blue recording indicator (replaces red)
 
 PAD   = 14
 IND_W = 18
@@ -49,13 +50,14 @@ TMR_W = 40   # timer only
 LBL_W = 66
 
 def _layout(w):
-    """Compute control-strip x-positions for a given panel width."""
+    """Compute control-strip x-positions for a given panel width.
+    No text state label — the indicator animation conveys state — so the
+    waveform spans from the indicator all the way to the timer."""
     ind_x = PAD
     tmr_x = w - PAD - TMR_W
-    lbl_x = tmr_x - LBL_W - 2
     wav_x = ind_x + IND_W + 8
-    wav_w = lbl_x - wav_x - 4
-    return ind_x, wav_x, wav_w, lbl_x, tmr_x
+    wav_w = tmr_x - wav_x - 10
+    return ind_x, wav_x, wav_w, 0, tmr_x
 
 # Animation constants
 MORPH_SPEED   = 2.5   # units/sec for state morph (0→1)
@@ -134,7 +136,7 @@ class _PillCanvas(NSView):
         elif s == "recording":
             self._morph_target = 0.0
             # Spawn a ripple ring on recording start
-            self._rings = [(time.time(), 28.0, RED)]
+            self._rings = [(time.time(), 28.0, ACCENT)]
         elif s == "idle":
             self._morph_target = 0.0
             self._morph = 0.0
@@ -203,12 +205,6 @@ class _PillCanvas(NSView):
         self._draw_indicator(ind_x + IND_W / 2, PILL_H / 2)
         self._draw_waveform(NSMakeRect(wav_x, (PILL_H - 22) / 2, wav_w, 22))
 
-        state_label = {"recording": "Listening",
-                       "transcribing": "Transcribing",
-                       "polishing": "Enhancing",
-                       "done": "Done"}.get(self._state, "")
-        _draw_text(state_label, _ATTRS_STATE,
-                   _vcenter_rect(lbl_x, LBL_W, 16, 0, PILL_H))
         _draw_text(self._timer_str, _ATTRS_TIMER,
                    _vcenter_rect(tmr_x, TMR_W, 16, 0, PILL_H))
 
@@ -325,13 +321,13 @@ class _PillCanvas(NSView):
                        color.blueComponent(), a).setFill()
                     NSBezierPath.bezierPathWithOvalInRect_(
                         NSMakeRect(cx-r, cy-r, r*2, r*2)).fill()
-            # Pulse
+            # Soft blue pulsing dot (replaces the red record button)
             pulse = 0.5 + 0.5 * math.sin(self._phase * 2 * math.pi)
             rr = 9 + 4 * pulse
-            _c(1.0, 0.27, 0.23, 0.18 * (1 - pulse)).setFill()
+            _c(0.45, 0.74, 1.0, 0.20 * (1 - pulse)).setFill()
             NSBezierPath.bezierPathWithOvalInRect_(
                 NSMakeRect(cx-rr, cy-rr, rr*2, rr*2)).fill()
-            RED.setFill()
+            ACCENT.setFill()
             NSBezierPath.bezierPathWithOvalInRect_(
                 NSMakeRect(cx-7, cy-7, 14, 14)).fill()
 
@@ -348,12 +344,10 @@ class _PillCanvas(NSView):
 
         else:
             # Morphing: dot shrinks toward center, dots fade in
-            # Red dot shrinking
             dot_scale = 1.0 - m
             r = 7 * dot_scale
-            red_a = 1.0 - m
             if r > 0.5:
-                _c(1.0, 0.27, 0.23, red_a).setFill()
+                _c(0.45, 0.74, 1.0, 1.0 - m).setFill()
                 NSBezierPath.bezierPathWithOvalInRect_(
                     NSMakeRect(cx-r, cy-r, r*2, r*2)).fill()
             # Three dots fading in
