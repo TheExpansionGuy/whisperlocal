@@ -1158,23 +1158,33 @@ class WhisperLocal(rumps.App):
             return None, None
 
     def _paste(self, text: str):
-        """Insert text by typing it directly (no clipboard touched).
-        Falls back to clipboard+⌘V if typing fails."""
-        try:
-            self._kb.type(text)
-            return
-        except Exception as e:
-            print(f"type failed ({e}); falling back to clipboard")
+        """Insert text. For anything but very short snippets, use an instant
+        clipboard paste (⌘V) — typing char-by-char is slow for long transcripts.
+        Short snippets are typed directly so the clipboard isn't touched."""
+        if len(text) <= 25:
+            try:
+                self._kb.type(text)
+                return
+            except Exception as e:
+                print(f"type failed ({e}); using clipboard")
+        # Instant clipboard paste — length-independent
         try:
             prev = pyperclip.paste()
+        except Exception:
+            prev = ""
+        try:
             pyperclip.copy(text)
-            time.sleep(0.05)
+            time.sleep(0.04)
             with self._kb.pressed(keyboard.Key.cmd):
                 self._kb.tap("v")
-            time.sleep(0.2)
-            pyperclip.copy(prev)
+            time.sleep(0.12)
         except Exception as e:
-            print(f"clipboard fallback failed: {e}")
+            print(f"clipboard paste failed: {e}")
+        finally:
+            try:
+                pyperclip.copy(prev)
+            except Exception:
+                pass
 
 
 if __name__ == "__main__":
