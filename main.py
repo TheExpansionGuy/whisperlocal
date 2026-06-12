@@ -74,11 +74,11 @@ ICON_TRANSCRIBING = str(_RESOURCES / "assets" / "menubar_proc.png")
 WAVEFORM_BINS = 48
 WAVEFORM_WINDOW = collections.deque([0.02] * WAVEFORM_BINS, maxlen=WAVEFORM_BINS)
 
-FIRST_CHUNK_DELAY = 0.5  # transcribe the first slice quickly so text appears fast
-CHUNK_INTERVAL  = 0.8   # how often to re-transcribe the live tail
-SETTLE_MARGIN   = 0.5   # keep committed point close to the live edge
-MIN_TAIL_SECS   = 0.4   # minimum audio before a transcription pass
-MAX_TAIL_SECS   = 4.5   # force-commit beyond this so passes stay fast + final pass is small
+FIRST_CHUNK_DELAY = 0.35  # transcribe the first slice quickly so text appears fast
+CHUNK_INTERVAL  = 0.6   # how often to re-transcribe the live tail
+SETTLE_MARGIN   = 0.35  # commit closer to the live edge → snappier + smaller end pass
+MIN_TAIL_SECS   = 0.35  # minimum audio before a transcription pass
+MAX_TAIL_SECS   = 3.0   # force-commit beyond this so passes stay fast + final pass tiny
 MAX_RECORD_SECS = 300
 
 
