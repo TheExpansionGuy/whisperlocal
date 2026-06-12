@@ -38,6 +38,13 @@ from pynput import keyboard
 # experience lives on the 'experimental' git branch. Flip to False to re-enable.
 MINIMAL = True
 
+# PROTOTYPE: use the real-time sherpa-onnx streaming model instead of Whisper.
+# Runs in-process (no worker), instant, but lower accuracy + no punctuation.
+# Dev-only for now (run `python main.py` from the venv). Set False for Whisper.
+USE_STREAMING = True
+STREAMING_MODEL_DIR = str(Path(__file__).parent / "models" /
+                          "sherpa-onnx-streaming-zipformer-en-2023-06-26")
+
 CONFIG_PATH = Path.home() / ".whisperlocal" / "config.json"
 DEFAULTS = {"model": "mlx-community/whisper-small.en-mlx", "filler_removal": True,
             "llm_cleanup": False, "low_power": False, "sounds": True,
@@ -204,10 +211,26 @@ class WhisperLocal(rumps.App):
         self._editor = ReviewEditor.alloc().init()
         self._review_audio = None
 
+        self._stream_engine = None
         self._build_menu()
         self._request_accessibility()
-        threading.Thread(target=self._load_model, daemon=True).start()
+        if USE_STREAMING:
+            threading.Thread(target=self._load_streaming, daemon=True).start()
+        else:
+            threading.Thread(target=self._load_model, daemon=True).start()
         self._start_listener()
+
+    def _load_streaming(self):
+        self._set_state("transcribing")
+        try:
+            from streaming_engine import StreamingEngine
+            self._stream_engine = StreamingEngine(STREAMING_MODEL_DIR)
+            self._model_ready = True
+            self._set_status("⚡ Streaming (sherpa) — hold ⌥")
+        except Exception as e:
+            print(f"streaming load error: {e}")
+            self._set_status(f"Streaming ❌ {str(e)[:50]}")
+        self._set_state("idle")
 
     # ------------------------------------------------------------------
     # Accessibility permission
@@ -793,6 +816,8 @@ class WhisperLocal(rumps.App):
             self._target_element, self._target_app = self._snapshot_focus()
         self.recording    = True
         self.audio_chunks = []
+        if USE_STREAMING and self._stream_engine:
+            self._stream_engine.start()
         WAVEFORM_WINDOW.extend([0.02] * WAVEFORM_BINS)
         self._set_state("recording")
         self._play_sound("Tink")        # soft start cue
@@ -820,7 +845,8 @@ class WhisperLocal(rumps.App):
         if not self.recording:          # released already (quick tap) — clean up
             self._close_stream()
             return
-        self._start_partial_timer()
+        if not USE_STREAMING:           # Whisper needs the chunk timer; sherpa doesn't
+            self._start_partial_timer()
         self._start_timeout()
 
     def _close_stream(self):
@@ -900,6 +926,14 @@ class WhisperLocal(rumps.App):
             return  # paused → drop audio so the gap isn't recorded
         chunk = indata.copy()
         self.audio_chunks.append(chunk)
+        # STREAMING: feed audio straight into sherpa and show the live partial.
+        if USE_STREAMING and self._stream_engine:
+            try:
+                partial = self._stream_engine.feed(chunk.flatten())
+                if partial:
+                    self._overlay.push_text_parts("", partial)
+            except Exception as e:
+                print(f"stream feed error: {e}")
         # Decibel-based level so quiet / distant speech still shows clearly.
         rms = float(np.sqrt(np.mean(chunk ** 2))) + 1e-9
         db = 20.0 * np.log10(rms)          # ~ -60 (silence) .. 0 (max)
@@ -1015,20 +1049,23 @@ class WhisperLocal(rumps.App):
             self._model_lock.release()
 
     def _transcribe_final(self):
-        """On release: transcribe the remaining tail, append, optionally clean up, paste.
-        Paste is bulletproof — any error in transcription/cleanup still pastes what we have."""
+        """On release: produce the final text and paste."""
         try:
             self._close_stream()   # stop the mic off the main thread
-            try:
-                n = len(self.audio_chunks)
-                samples = sum(len(c) for c in self.audio_chunks) if self.audio_chunks else 0
-                with open(Path.home()/".whisperlocal"/"debug.log","a") as f:
-                    f.write(f"[final] chunks={n} samples={samples} "
-                            f"secs={samples/SAMPLE_RATE:.2f}\n")
-            except Exception:
-                pass
             if self._cancelled:
                 return
+
+            # STREAMING: the transcript is already done — finalize is instant.
+            if USE_STREAMING and self._stream_engine:
+                final = self._stream_engine.finalize().strip()
+                if self.cfg.get("filler_removal"):
+                    final = FILLER_RE.sub("", final).strip()
+                if final:
+                    self._commit_final(final)
+                return
+
+            # Start from committed text; try to transcribe the small remaining tail.
+            final = self._committed_text
 
             # Start from committed text; try to transcribe the small remaining tail.
             final = self._committed_text
