@@ -49,6 +49,20 @@ cp transcribe_worker.py "$RES/transcribe_worker.py"
 cp trainer.py "$RES/trainer.py"
 cp overlay.py "$RES/overlay.py"
 cp review_editor.py "$RES/review_editor.py"
+cp streaming_engine.py "$RES/streaming_engine.py"
+cp streaming_worker.py "$RES/streaming_worker.py"
+
+echo "▸ Bundling streaming model (int8 files only)…"
+SM="models/sherpa-onnx-streaming-zipformer-en-2023-06-26"
+DSTM="$RES/streaming-model"
+if [ -d "$SM" ]; then
+  mkdir -p "$DSTM"
+  cp "$SM"/tokens.txt "$DSTM"/ 2>/dev/null
+  cp "$SM"/*int8.onnx "$DSTM"/ 2>/dev/null
+  echo "  streaming model: $(du -sh $DSTM | cut -f1)"
+else
+  echo "  ⚠ streaming model not found at $SM — Real-time mode won't work"
+fi
 
 echo "▸ Embedding ML dependencies (self-contained — no machine deps)…"
 # Copy the venv's site-packages into the bundle so the worker, run with the

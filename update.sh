@@ -11,6 +11,8 @@ cp overlay.py          "$RES/overlay.py"
 cp trainer.py          "$RES/trainer.py"
 cp review_editor.py    "$RES/review_editor.py"
 cp transcribe_worker.py "$RES/transcribe_worker.py"
+cp streaming_engine.py  "$RES/streaming_engine.py"
+cp streaming_worker.py  "$RES/streaming_worker.py"
 
 # Remove any stale compiled copy of overlay in the zip so the fresh .py wins
 ZIP=$(ls "$RES/lib/python"*.zip 2>/dev/null || true)

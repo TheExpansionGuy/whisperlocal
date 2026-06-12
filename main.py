@@ -38,17 +38,19 @@ from pynput import keyboard
 # experience lives on the 'experimental' git branch. Flip to False to re-enable.
 MINIMAL = True
 
-# PROTOTYPE: use the real-time sherpa-onnx streaming model instead of Whisper.
-# Runs in-process (no worker), instant, but lower accuracy + no punctuation.
-# Dev-only for now (run `python main.py` from the venv). Set False for Whisper.
-USE_STREAMING = True
-STREAMING_MODEL_DIR = str(Path(__file__).parent / "models" /
-                          "sherpa-onnx-streaming-zipformer-en-2023-06-26")
+# Real-time streaming model (sherpa-onnx) selectable from the menu as an
+# alternative to Whisper: instant, but lower accuracy + no punctuation.
+_STREAM_MODEL_NAME = "sherpa-onnx-streaming-zipformer-en-2023-06-26"
+
+def _streaming_model_dir() -> str:
+    if getattr(sys, "frozen", False):
+        return str(Path(sys.executable).parent.parent / "Resources" / "streaming-model")
+    return str(Path(__file__).parent / "models" / _STREAM_MODEL_NAME)
 
 CONFIG_PATH = Path.home() / ".whisperlocal" / "config.json"
 DEFAULTS = {"model": "mlx-community/whisper-small.en-mlx", "filler_removal": True,
             "llm_cleanup": False, "low_power": False, "sounds": True,
-            "personalize": True, "review": False, "history": []}
+            "personalize": True, "review": False, "engine": "whisper", "history": []}
 
 LOW_POWER_MODEL = "mlx-community/whisper-base.en-mlx"  # lighter model when low-power on
 HISTORY_MAX = 10
@@ -211,26 +213,88 @@ class WhisperLocal(rumps.App):
         self._editor = ReviewEditor.alloc().init()
         self._review_audio = None
 
-        self._stream_engine = None
+        self._stream_worker = None
+        self._stream_lock = threading.Lock()       # serialize writes to worker stdin
+        self._stream_final_event = threading.Event()
+        self._stream_final_text = ""
         self._build_menu()
         self._request_accessibility()
-        if USE_STREAMING:
-            threading.Thread(target=self._load_streaming, daemon=True).start()
-        else:
-            threading.Thread(target=self._load_model, daemon=True).start()
+        threading.Thread(target=self._start_engine, daemon=True).start()
         self._start_listener()
 
+    def _use_streaming(self) -> bool:
+        return self.cfg.get("engine", "whisper") == "streaming"
+
+    def _toggle_engine(self, sender):
+        self.cfg["engine"] = "streaming" if self.cfg.get("engine") != "streaming" else "whisper"
+        sender.state = int(self._use_streaming())
+        save_config(self.cfg)
+        self._model_ready = False
+        self._set_status("loading…")
+        threading.Thread(target=self._start_engine, daemon=True).start()
+
+    def _start_engine(self):
+        """Load whichever engine is selected (Whisper worker or streaming worker)."""
+        if self._use_streaming():
+            self._load_streaming()
+        else:
+            self._load_model()
+
     def _load_streaming(self):
+        """Start the sherpa streaming worker subprocess + reader thread."""
         self._set_state("transcribing")
         try:
-            from streaming_engine import StreamingEngine
-            self._stream_engine = StreamingEngine(STREAMING_MODEL_DIR)
-            self._model_ready = True
-            self._set_status("⚡ Streaming (sherpa) — hold ⌥")
+            with self._model_lock:
+                if hasattr(self, "_worker") and self._worker and self._worker.poll() is None:
+                    try: self._worker.terminate()
+                    except Exception: pass
+                    self._worker = None
+                script = (str(Path(sys.executable).parent.parent / "Resources" / "streaming_worker.py")
+                          if getattr(sys, "frozen", False)
+                          else str(Path(__file__).parent / "streaming_worker.py"))
+                self._stream_worker = subprocess.Popen(
+                    [self._venv_python(), script, _streaming_model_dir()],
+                    stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    env=self._worker_env(), bufsize=0)
+                ready, _, _ = select.select([self._stream_worker.stdout], [], [], 60)
+                line = self._stream_worker.stdout.readline().strip() if ready else b"TIMEOUT"
+            if line == b"READY":
+                self._model_ready = True
+                self._set_status("⚡ Real-time mode — hold ⌥")
+                threading.Thread(target=self._stream_reader, daemon=True).start()
+            else:
+                raise RuntimeError(line.decode(errors="replace")[:80])
         except Exception as e:
             print(f"streaming load error: {e}")
-            self._set_status(f"Streaming ❌ {str(e)[:50]}")
+            self._set_status(f"Real-time ❌ {str(e)[:50]}")
         self._set_state("idle")
+
+    def _stream_reader(self):
+        """Read partial/final lines from the streaming worker."""
+        w = self._stream_worker
+        while w and w.poll() is None:
+            try:
+                line = w.stdout.readline()
+            except Exception:
+                break
+            if not line:
+                break
+            if line.startswith(b"P "):
+                if self.recording and self._use_streaming():
+                    self._overlay.push_text_parts("", line[2:].decode(errors="replace").strip())
+            elif line.startswith(b"F "):
+                self._stream_final_text = line[2:].decode(errors="replace").strip()
+                self._stream_final_event.set()
+
+    def _stream_send(self, cmd: bytes, data: bytes = b""):
+        if not self._stream_worker or self._stream_worker.poll() is not None:
+            return
+        try:
+            with self._stream_lock:
+                self._stream_worker.stdin.write(cmd + b"\n" + data)
+                self._stream_worker.stdin.flush()
+        except Exception as e:
+            print(f"stream send error: {e}")
 
     # ------------------------------------------------------------------
     # Accessibility permission
@@ -284,6 +348,9 @@ class WhisperLocal(rumps.App):
             filler_item = rumps.MenuItem("Remove Filler Words", callback=self._toggle_filler)
             filler_item.state = int(self.cfg["filler_removal"])
             self.menu.add(filler_item)
+            rt_item = rumps.MenuItem("Real-time mode (beta)", callback=self._toggle_engine)
+            rt_item.state = int(self._use_streaming())
+            self.menu.add(rt_item)
             self.menu.add(rumps.MenuItem("Check Accessibility…", callback=self._open_accessibility))
             self.menu.add(rumps.separator)
             self.menu.add(rumps.MenuItem("Quit", callback=self._quit))
@@ -627,15 +694,26 @@ class WhisperLocal(rumps.App):
             "PATH":   f"{Path(venv_python).parent}:/usr/bin:/bin:/usr/local/bin",
             "LANG":   "en_US.UTF-8",
         }
+        paths = []
         pylib = self._bundle_pylib()
         if pylib and Path(pylib).exists():
-            env["PYTHONPATH"] = pylib   # embedded mlx/mlx_whisper/etc.
+            paths.append(pylib)         # embedded mlx/mlx_whisper/sherpa_onnx/etc.
+        if getattr(sys, "frozen", False):
+            paths.append(str(Path(sys.executable).parent.parent / "Resources"))  # streaming_engine.py
+        else:
+            paths.append(str(Path(__file__).parent))
+        env["PYTHONPATH"] = ":".join(paths)
         return env
 
     def _load_model(self):
         """Start persistent worker — stays alive between transcriptions."""
         self._set_state("transcribing")
         model = self._effective_model()
+        # Shut down the streaming worker if we're switching away from it
+        if self._stream_worker and self._stream_worker.poll() is None:
+            try: self._stream_worker.terminate()
+            except Exception: pass
+            self._stream_worker = None
         try:
             with self._model_lock:
                 # Terminate any existing worker (e.g. when switching models)
@@ -816,8 +894,9 @@ class WhisperLocal(rumps.App):
             self._target_element, self._target_app = self._snapshot_focus()
         self.recording    = True
         self.audio_chunks = []
-        if USE_STREAMING and self._stream_engine:
-            self._stream_engine.start()
+        if self._use_streaming():
+            self._stream_final_event.clear()
+            self._stream_send(b"START")
         WAVEFORM_WINDOW.extend([0.02] * WAVEFORM_BINS)
         self._set_state("recording")
         self._play_sound("Tink")        # soft start cue
@@ -845,7 +924,7 @@ class WhisperLocal(rumps.App):
         if not self.recording:          # released already (quick tap) — clean up
             self._close_stream()
             return
-        if not USE_STREAMING:           # Whisper needs the chunk timer; sherpa doesn't
+        if not self._use_streaming():   # Whisper needs the chunk timer; sherpa doesn't
             self._start_partial_timer()
         self._start_timeout()
 
@@ -926,14 +1005,10 @@ class WhisperLocal(rumps.App):
             return  # paused → drop audio so the gap isn't recorded
         chunk = indata.copy()
         self.audio_chunks.append(chunk)
-        # STREAMING: feed audio straight into sherpa and show the live partial.
-        if USE_STREAMING and self._stream_engine:
-            try:
-                partial = self._stream_engine.feed(chunk.flatten())
-                if partial:
-                    self._overlay.push_text_parts("", partial)
-            except Exception as e:
-                print(f"stream feed error: {e}")
+        # STREAMING: ship audio frames to the sherpa worker (partials come back
+        # asynchronously via the reader thread).
+        if self._use_streaming():
+            self._stream_send(b"A" + str(chunk.nbytes).encode(), chunk.flatten().tobytes())
         # Decibel-based level so quiet / distant speech still shows clearly.
         rms = float(np.sqrt(np.mean(chunk ** 2))) + 1e-9
         db = 20.0 * np.log10(rms)          # ~ -60 (silence) .. 0 (max)
@@ -1055,9 +1130,11 @@ class WhisperLocal(rumps.App):
             if self._cancelled:
                 return
 
-            # STREAMING: the transcript is already done — finalize is instant.
-            if USE_STREAMING and self._stream_engine:
-                final = self._stream_engine.finalize().strip()
+            # STREAMING: ask the worker to flush; the final arrives near-instantly.
+            if self._use_streaming():
+                self._stream_send(b"FINAL")
+                self._stream_final_event.wait(timeout=6)
+                final = self._stream_final_text.strip()
                 if self.cfg.get("filler_removal"):
                     final = FILLER_RE.sub("", final).strip()
                 if final:
