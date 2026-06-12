@@ -671,17 +671,18 @@ class WhisperLocal(rumps.App):
             return text
 
     def _run_transcription_full(self, audio: np.ndarray, prompt: str = "",
-                                words: bool = False) -> dict:
-        """Send audio to worker, return {'text', optionally 'words'}.
+                                words: bool = False, segments: bool = False) -> dict:
+        """Send audio to worker, return {'text', optionally 'words'/'segments'}.
         Self-healing: if the worker has died or stops responding, restart it."""
-        empty = {"text": "", "words": []}
+        empty = {"text": "", "words": [], "segments": []}
         if not hasattr(self, "_worker") or self._worker is None or self._worker.poll() is not None:
             self._restart_worker_async()
             return empty
         try:
             data = audio.tobytes()
             header = json.dumps(
-                {"n": len(data), "prompt": prompt[-200:], "words": words}).encode()
+                {"n": len(data), "prompt": prompt[-200:],
+                 "words": words, "segments": segments}).encode()
             self._worker.stdin.write(header + b"\n" + data)
             self._worker.stdin.flush()
             # Wait for a response with a timeout — never block forever.
@@ -943,11 +944,10 @@ class WhisperLocal(rumps.App):
         self._partial_timer.start()
 
     def _process_chunk(self):
-        """LocalAgreement-2: commit only words that two consecutive runs agree on.
-        A word is locked in when the model produces it identically twice — far more
-        robust than committing on a timer (self-correcting, repetition-resistant)."""
+        """Segment-level streaming: transcribe the tail (no word-timestamps → ~2x
+        faster), commit whole segments once they're settled, and display only the
+        CONFIRMED text. No flickering word-by-word preview."""
         if not self._model_lock.acquire(blocking=False):
-            _slog("skip(lock)")
             return  # a transcription is already in flight; skip this tick
         try:
             if not self.audio_chunks:
@@ -958,57 +958,43 @@ class WhisperLocal(rumps.App):
             if tail_dur < MIN_TAIL_SECS:
                 return
 
-            # Silence gating: skip the (expensive) transcription pass if the tail
-            # is essentially quiet — nothing to transcribe, saves a lot of compute.
-            tail_rms = float(np.sqrt(np.mean(tail ** 2)))
-            if tail_rms < 0.004:
-                _slog(f"skip(silent) tail={tail_dur:.1f}")
+            # Silence gating: skip the pass if the tail is essentially quiet.
+            if float(np.sqrt(np.mean(tail ** 2))) < 0.004:
                 return
 
             _t0 = time.time()
             result = self._run_transcription_full(
-                tail, self._committed_text, words=True)
+                tail, self._committed_text, segments=True)
             _dur = time.time() - _t0
-            words = result.get("words", [])
-            if not words:
-                _slog(f"pass tail={tail_dur:.1f} dur={_dur:.2f} words=0")
+            segs = result.get("segments", [])
+            if not segs:
                 return
 
-            new_norm = [_norm_word(wd["w"]) for wd in words]
+            # Commit segments that end safely before the live edge.
+            settle_edge = tail_dur - SETTLE_MARGIN
+            commit_until = 0.0
+            committed_now = []
+            for s in segs:
+                if s["end"] <= settle_edge:
+                    committed_now.append(s["text"]); commit_until = s["end"]
+                else:
+                    break
 
-            # Agreement = longest common prefix with the previous hypothesis
-            agree = _common_prefix_len(self._prev_words, new_norm)
+            # If the tail is too long but nothing settled, force-commit all but the
+            # last segment so we make forward progress (keeps passes fast).
+            if not committed_now and tail_dur > MAX_TAIL_SECS and len(segs) >= 2:
+                committed_now = [s["text"] for s in segs[:-1]]
+                commit_until  = segs[-2]["end"]
 
-            # Don't commit a word still within SETTLE_MARGIN of the live edge
-            # (it may still be mid-utterance even if it matched).
-            while agree > 0 and words[agree - 1]["end"] > tail_dur - SETTLE_MARGIN:
-                agree -= 1
-
-            # Safeguard: if the tail has grown too long (continuous speech where
-            # passes never agree), force-commit everything older than SETTLE_MARGIN
-            # so the tail stays short and passes stay fast (prevents the stall).
-            if tail_dur > MAX_TAIL_SECS:
-                forced = agree
-                while forced < len(words) and words[forced]["end"] <= tail_dur - SETTLE_MARGIN:
-                    forced += 1
-                agree = max(agree, forced)
-
-            _slog(f"pass tail={tail_dur:.1f} dur={_dur:.2f} words={len(words)} "
-                  f"agree={agree} committed_chars={len(self._committed_text)}")
-            if agree > 0:
-                committed = " ".join(wd["w"] for wd in words[:agree]).strip()
+            _slog(f"seg tail={tail_dur:.1f} dur={_dur:.2f} segs={len(segs)} "
+                  f"committed={len(committed_now)} chars={len(self._committed_text)}")
+            if committed_now:
                 self._committed_text = _collapse_repeats(
-                    (self._committed_text + " " + committed).strip())
-                self._committed_samples += int(words[agree - 1]["end"] * SAMPLE_RATE)
-                # Remaining hypothesis is now relative to the new committed point
-                self._prev_words = new_norm[agree:]
-            else:
-                self._prev_words = new_norm
-
-            # Live display: committed (solid) + settling tail (shimmer)
-            tail_guess = _collapse_repeats(" ".join(wd["w"] for wd in words[agree:]).strip())
-            committed_disp = _collapse_repeats(self._committed_text.strip())
-            self._overlay.push_text_parts(committed_disp, tail_guess)
+                    (self._committed_text + " " + " ".join(committed_now)).strip())
+                self._committed_samples += int(commit_until * SAMPLE_RATE)
+                # Show only the confirmed transcript (segment-by-segment).
+                self._overlay.push_text_parts(
+                    _fix_spacing(_collapse_repeats(self._committed_text.strip())), "")
         except Exception as e:
             print(f"Chunk error: {e}")
         finally:

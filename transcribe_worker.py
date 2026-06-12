@@ -83,12 +83,9 @@ def main():
     try:
         import mlx_whisper
         silence = np.zeros(16000, dtype=np.float32)
-        # Warm up BOTH code paths so the first real call isn't an 8s cold compile:
+        # Warm up the inference path so the first real call isn't an 8s cold compile.
         mlx_whisper.transcribe(silence, path_or_hf_repo=model,
                                language=lang, verbose=False)
-        mlx_whisper.transcribe(silence, path_or_hf_repo=model,
-                               language=lang, verbose=False,
-                               word_timestamps=True)   # the streaming path
     except Exception as e:
         sys.stdout, sys.stderr = _out, _err
         print(f"ERROR:{e}", flush=True)
@@ -128,6 +125,13 @@ def main():
             result = mlx_whisper.transcribe(audio, **kwargs)
             text   = result.get("text", "").strip()
             out    = {"text": text}
+
+            # Segment boundaries (cheap — no word_timestamps needed)
+            if header.get("segments"):
+                out["segments"] = [
+                    {"text": s.get("text", "").strip(), "end": s.get("end", 0.0)}
+                    for s in result.get("segments", [])
+                ]
 
             if words_wanted:
                 words = []
