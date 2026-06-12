@@ -83,9 +83,11 @@ def main():
     try:
         import mlx_whisper
         silence = np.zeros(16000, dtype=np.float32)
-        # Warm up the inference path so the first real call isn't an 8s cold compile.
+        # Warm up both paths so the first streaming call isn't an 8s cold compile.
         mlx_whisper.transcribe(silence, path_or_hf_repo=model,
                                language=lang, verbose=False)
+        mlx_whisper.transcribe(silence, path_or_hf_repo=model,
+                               language=lang, verbose=False, word_timestamps=True)
     except Exception as e:
         sys.stdout, sys.stderr = _out, _err
         print(f"ERROR:{e}", flush=True)
