@@ -222,20 +222,29 @@ class WhisperLocal(rumps.App):
         threading.Thread(target=self._start_engine, daemon=True).start()
         self._start_listener()
 
+    def _engine(self) -> str:
+        return self.cfg.get("engine", "whisper")   # "whisper" | "hybrid"
+
     def _use_streaming(self) -> bool:
-        return self.cfg.get("engine", "whisper") == "streaming"
+        # sherpa drives the LIVE display in hybrid (and pure streaming) mode
+        return self._engine() in ("streaming", "hybrid")
 
     def _toggle_engine(self, sender):
-        self.cfg["engine"] = "streaming" if self.cfg.get("engine") != "streaming" else "whisper"
-        sender.state = int(self._use_streaming())
+        # Toggle between plain Whisper and the hybrid (sherpa live + Whisper final)
+        self.cfg["engine"] = "hybrid" if self._engine() != "hybrid" else "whisper"
+        sender.state = int(self._engine() == "hybrid")
         save_config(self.cfg)
         self._model_ready = False
         self._set_status("loading…")
         threading.Thread(target=self._start_engine, daemon=True).start()
 
     def _start_engine(self):
-        """Load whichever engine is selected (Whisper worker or streaming worker)."""
-        if self._use_streaming():
+        """Load the engine(s) the selected mode needs."""
+        eng = self._engine()
+        if eng == "hybrid":
+            self._load_streaming()   # sherpa for live display
+            self._load_model()       # whisper for the accurate final paste
+        elif eng == "streaming":
             self._load_streaming()
         else:
             self._load_model()
@@ -245,7 +254,9 @@ class WhisperLocal(rumps.App):
         self._set_state("transcribing")
         try:
             with self._model_lock:
-                if hasattr(self, "_worker") and self._worker and self._worker.poll() is None:
+                # Don't kill the whisper worker in hybrid mode — it does the final paste
+                if (self._engine() != "hybrid" and hasattr(self, "_worker")
+                        and self._worker and self._worker.poll() is None):
                     try: self._worker.terminate()
                     except Exception: pass
                     self._worker = None
@@ -348,8 +359,8 @@ class WhisperLocal(rumps.App):
             filler_item = rumps.MenuItem("Remove Filler Words", callback=self._toggle_filler)
             filler_item.state = int(self.cfg["filler_removal"])
             self.menu.add(filler_item)
-            rt_item = rumps.MenuItem("Real-time mode (beta)", callback=self._toggle_engine)
-            rt_item.state = int(self._use_streaming())
+            rt_item = rumps.MenuItem("Real-time preview (beta)", callback=self._toggle_engine)
+            rt_item.state = int(self._engine() == "hybrid")
             self.menu.add(rt_item)
             self.menu.add(rumps.MenuItem("Check Accessibility…", callback=self._open_accessibility))
             self.menu.add(rumps.separator)
@@ -709,8 +720,8 @@ class WhisperLocal(rumps.App):
         """Start persistent worker — stays alive between transcriptions."""
         self._set_state("transcribing")
         model = self._effective_model()
-        # Shut down the streaming worker if we're switching away from it
-        if self._stream_worker and self._stream_worker.poll() is None:
+        # Shut down the streaming worker unless hybrid mode needs it for live display
+        if self._engine() != "hybrid" and self._stream_worker and self._stream_worker.poll() is None:
             try: self._stream_worker.terminate()
             except Exception: pass
             self._stream_worker = None
@@ -734,9 +745,12 @@ class WhisperLocal(rumps.App):
                 line = self._worker.stdout.readline().strip() if ready else b"TIMEOUT"
             if line == b"READY":
                 self._model_ready = True
-                tag = "🔋 " if self.cfg.get("low_power", False) else ""
-                model_short = model.split("/")[-1]
-                self._set_status(f"MLX ✅  {tag}{model_short} — hold ⌥")
+                if self._engine() == "hybrid":
+                    self._set_status("⚡ Real-time + Whisper — hold ⌥")
+                else:
+                    tag = "🔋 " if self.cfg.get("low_power", False) else ""
+                    model_short = model.split("/")[-1]
+                    self._set_status(f"MLX ✅  {tag}{model_short} — hold ⌥")
             elif line.startswith(b"ERROR:"):
                 raise RuntimeError(line.decode())
             else:
@@ -1130,9 +1144,12 @@ class WhisperLocal(rumps.App):
             if self._cancelled:
                 return
 
-            # STREAMING: ask the worker to flush; the final arrives near-instantly.
+            # In hybrid mode, tell sherpa to wrap up its live display, but the
+            # PASTE comes from Whisper below (accurate). In pure-streaming mode,
+            # sherpa's output IS the final.
             if self._use_streaming():
                 self._stream_send(b"FINAL")
+            if self._engine() == "streaming":
                 self._stream_final_event.wait(timeout=6)
                 final = self._stream_final_text.strip()
                 if self.cfg.get("filler_removal"):
