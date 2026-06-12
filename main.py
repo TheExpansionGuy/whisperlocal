@@ -78,8 +78,16 @@ FIRST_CHUNK_DELAY = 0.5  # transcribe the first slice quickly so text appears fa
 CHUNK_INTERVAL  = 0.8   # how often to re-transcribe the live tail
 SETTLE_MARGIN   = 0.5   # keep committed point close to the live edge
 MIN_TAIL_SECS   = 0.4   # minimum audio before a transcription pass
-MAX_TAIL_SECS   = 8.0   # force-commit if the unsettled tail grows beyond this (bounds latency)
+MAX_TAIL_SECS   = 4.5   # force-commit beyond this so passes stay fast + final pass is small
 MAX_RECORD_SECS = 300
+
+
+def _slog(msg: str):
+    try:
+        with open(Path.home() / ".whisperlocal" / "stream.log", "a") as f:
+            f.write(f"{time.time():.1f} {msg}\n")
+    except Exception:
+        pass
 
 
 def _collapse_repeats(text: str) -> str:
@@ -939,6 +947,7 @@ class WhisperLocal(rumps.App):
         A word is locked in when the model produces it identically twice — far more
         robust than committing on a timer (self-correcting, repetition-resistant)."""
         if not self._model_lock.acquire(blocking=False):
+            _slog("skip(lock)")
             return  # a transcription is already in flight; skip this tick
         try:
             if not self.audio_chunks:
@@ -953,12 +962,16 @@ class WhisperLocal(rumps.App):
             # is essentially quiet — nothing to transcribe, saves a lot of compute.
             tail_rms = float(np.sqrt(np.mean(tail ** 2)))
             if tail_rms < 0.004:
+                _slog(f"skip(silent) tail={tail_dur:.1f}")
                 return
 
+            _t0 = time.time()
             result = self._run_transcription_full(
                 tail, self._committed_text, words=True)
+            _dur = time.time() - _t0
             words = result.get("words", [])
             if not words:
+                _slog(f"pass tail={tail_dur:.1f} dur={_dur:.2f} words=0")
                 return
 
             new_norm = [_norm_word(wd["w"]) for wd in words]
@@ -980,6 +993,8 @@ class WhisperLocal(rumps.App):
                     forced += 1
                 agree = max(agree, forced)
 
+            _slog(f"pass tail={tail_dur:.1f} dur={_dur:.2f} words={len(words)} "
+                  f"agree={agree} committed_chars={len(self._committed_text)}")
             if agree > 0:
                 committed = " ".join(wd["w"] for wd in words[:agree]).strip()
                 self._committed_text = _collapse_repeats(
