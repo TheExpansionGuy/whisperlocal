@@ -190,29 +190,34 @@ class _PillCanvas(NSView):
     # -- drawing -----------------------------------------------------------
 
     def drawRect_(self, rect):
-        total_h = rect.size.height
         w = rect.size.width
 
-        # --- Control pill: fixed compact width, centred at the bottom ---------
+        # Minimal pill: waveform while recording, three dots while processing.
         pill_w = PANEL_W_COMPACT
         pill_x = (w - pill_w) / 2
         pill_rect = NSMakeRect(pill_x, 0, pill_w, PILL_H)
         self._draw_block(pill_rect, green=(self._state == "done"))
 
-        ind_x, wav_x, wav_w, lbl_x, tmr_x = _layout(pill_w)
-        ind_x += pill_x; wav_x += pill_x; lbl_x += pill_x; tmr_x += pill_x
+        cx = pill_x + pill_w / 2
+        cy = PILL_H / 2
+        if self._state in ("transcribing", "polishing"):
+            self._draw_processing_dots(cx, cy)
+        elif self._state == "done":
+            self._draw_check(cx, cy)
+        else:
+            # Recording / idle → waveform spanning the pill
+            self._draw_waveform(NSMakeRect(pill_x + PAD, (PILL_H - 22) / 2,
+                                           pill_w - 2 * PAD, 22))
+        return
 
-        self._draw_indicator(ind_x + IND_W / 2, PILL_H / 2)
-        self._draw_waveform(NSMakeRect(wav_x, (PILL_H - 22) / 2, wav_w, 22))
-
-        _draw_text(self._timer_str, _ATTRS_TIMER,
-                   _vcenter_rect(tmr_x, TMR_W, 16, 0, PILL_H))
-
-        # --- Transcript: separate floating block above the pill --------------
-        if total_h > PILL_H + GAP and self._word_alphas:
-            tx_rect = NSMakeRect(0, PILL_H + GAP, w, total_h - PILL_H - GAP)
-            self._draw_block(tx_rect, green=False)
-            self._draw_transcript(tx_rect)
+    def _draw_processing_dots(self, cx, cy):
+        sp = 8.0; dr = 2.6
+        for i in range(3):
+            t = (self._phase + i / 3.0) % 1.0
+            dy = -4 * math.sin(t * math.pi) if t < 1.0 else 0
+            DIM.setFill()
+            NSBezierPath.bezierPathWithOvalInRect_(
+                NSMakeRect(cx + (i - 1) * sp - dr, cy - dr + dy, dr * 2, dr * 2)).fill()
 
     def _draw_block(self, r, green=False):
         """Draw a rounded background block with border."""
@@ -373,7 +378,9 @@ class _PillCanvas(NSView):
                 self._phase * 2 * math.pi * 0.7 + i * 0.4) for i in range(n)]
             active = False
         else:
-            min_amp = 0.08
+            # Always keep a gentle baseline so the waveform stays alive (not
+            # starting/stopping) and scales up smoothly with your voice.
+            min_amp = 0.14
             base = [max(min_amp, lv) for lv in self._levels]
             active = True
 
@@ -474,44 +481,13 @@ class OverlayPanel(NSObject):
         self._canvas = canvas
 
     def _updateLayout(self):
+        # Minimal: fixed-size pill, never grows (no transcript box).
         if not self._panel: return
-        combined = (self._committed_disp + " " + self._tail_disp).strip()
-        words = combined.split() if combined else []
-
-        if not words:
-            panel_w = PANEL_W_COMPACT
-            text_h = 0
-        else:
-            attrs = {NSFontAttributeName: _FONT_TX}
-            word_w = [NSString.stringWithString_(w + " ").sizeWithAttributes_(attrs).width
-                      for w in words]
-            single_line = sum(word_w)
-            # Grow width with content: from compact up to the wide maximum
-            panel_w = max(PANEL_W_COMPACT,
-                          min(PANEL_W_WIDE, single_line + TX_PAD_H * 2))
-            max_w = panel_w - TX_PAD_H * 2
-            lines = 1; cur_w = 0.0
-            for wd in word_w:
-                if cur_w + wd > max_w and cur_w > 0:
-                    lines += 1; cur_w = wd
-                else:
-                    cur_w += wd
-            text_h = min(lines, MAX_LINES) * LINE_H + TX_PAD_V * 2
-
-        # Two-block layout: pill at bottom, gap, transcript block above
-        total_h = PILL_H + (GAP + text_h if text_h else 0)
         sf = NSScreen.mainScreen().frame()
-        x = (sf.size.width - panel_w) / 2 + sf.origin.x
+        x = (sf.size.width - PANEL_W_COMPACT) / 2 + sf.origin.x
         y = sf.origin.y + BOTTOM
-        new_frame = NSMakeRect(x, y, panel_w, total_h)
-
-        NSAnimationContext.beginGrouping()
-        NSAnimationContext.currentContext().setDuration_(0.18)
-        self._panel.animator().setFrame_display_(new_frame, True)
-        NSAnimationContext.endGrouping()
-
-        self._canvas.setFrame_(NSMakeRect(0, 0, panel_w, total_h))
-        self._canvas.setWords_([self._committed_disp, self._tail_disp])
+        self._panel.setFrame_display_(NSMakeRect(x, y, PANEL_W_COMPACT, PILL_H), True)
+        self._canvas.setFrame_(NSMakeRect(0, 0, PANEL_W_COMPACT, PILL_H))
 
     def _startTimer(self):
         if self._anim_timer: return
@@ -570,21 +546,10 @@ class OverlayPanel(NSObject):
         if self._canvas: self._canvas.setLevels_(lvl)
 
     def setTextObj_(self, text):
-        # Single-string update → all committed (used for final text)
-        text = text or ""
-        if text == self._committed_disp and not self._tail_disp:
-            return
-        self._committed_disp = text
-        self._tail_disp = ""
-        self._updateLayout()
+        pass   # minimal UI shows no transcript text
 
     def setTextPartsObj_(self, parts):
-        committed, tail = parts
-        if committed == self._committed_disp and tail == self._tail_disp:
-            return
-        self._committed_disp = committed or ""
-        self._tail_disp = tail or ""
-        self._updateLayout()
+        pass   # minimal UI shows no transcript text
 
     def setPowerObj_(self, p):
         self._power = p or ""
