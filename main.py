@@ -90,6 +90,14 @@ def _slog(msg: str):
         pass
 
 
+def _klog(msg: str):
+    try:
+        with open(Path.home() / ".whisperlocal" / "key.log", "a") as f:
+            f.write(f"{time.time():.1f} {msg}\n")
+    except Exception:
+        pass
+
+
 def _collapse_repeats(text: str) -> str:
     """Collapse runs of 3+ identical consecutive words to a single one.
     Guards against Whisper's repetition hallucination ('the the the the')."""
@@ -671,12 +679,16 @@ class WhisperLocal(rumps.App):
             return text
 
     def _run_transcription_full(self, audio: np.ndarray, prompt: str = "",
-                                words: bool = False, segments: bool = False) -> dict:
+                                words: bool = False, segments: bool = False,
+                                allow_restart: bool = True) -> dict:
         """Send audio to worker, return {'text', optionally 'words'/'segments'}.
-        Self-healing: if the worker has died or stops responding, restart it."""
+        `allow_restart` is False for background streaming passes — a flaky live
+        pass must NOT kill the worker or flip _model_ready (that's what caused
+        recordings to drop and the hotkey to need extra presses)."""
         empty = {"text": "", "words": [], "segments": []}
         if not hasattr(self, "_worker") or self._worker is None or self._worker.poll() is not None:
-            self._restart_worker_async()
+            if allow_restart:
+                self._restart_worker_async()
             return empty
         try:
             data = audio.tobytes()
@@ -688,21 +700,24 @@ class WhisperLocal(rumps.App):
             # Wait for a response with a timeout — never block forever.
             ready, _, _ = select.select([self._worker.stdout], [], [], 25)
             if not ready:
-                print("worker unresponsive — restarting")
-                self._restart_worker_async()
+                if allow_restart:
+                    print("worker unresponsive — restarting")
+                    self._restart_worker_async()
                 return empty
             line = self._worker.stdout.readline()
             if not line.strip():
                 return empty
             return json.loads(line.strip())
         except Exception as e:
-            print(f"Transcription error: {e}; restarting worker")
-            self._restart_worker_async()
+            if allow_restart:
+                print(f"Transcription error: {e}; restarting worker")
+                self._restart_worker_async()
             return empty
 
     def _restart_worker_async(self):
         """Kill any wedged worker and start a fresh one (off-thread, no deadlock).
         _load_model waits for the model lock, so it runs once the caller releases."""
+        _klog("WORKER_RESTART")
         try:
             if hasattr(self, "_worker") and self._worker and self._worker.poll() is None:
                 self._worker.kill()
@@ -731,8 +746,10 @@ class WhisperLocal(rumps.App):
             shift_now = bool(flags & 0x00020000)  # NSShiftKeyMask
 
             if alt_now and not self.recording and not self._transcribing:
+                _klog(f"PRESS alt_now={alt_now} rec={self.recording} trans={self._transcribing}")
                 self._on_press(keyboard.Key.alt_r)        # start
             elif not alt_now and self.recording:
+                _klog(f"RELEASE alt_now={alt_now} (flags={flags:#x})")
                 self._on_release(keyboard.Key.alt_r)      # stop
 
             # Shift tap while recording → toggle pause
@@ -796,20 +813,23 @@ class WhisperLocal(rumps.App):
         self._prev_words        = []
         self._paused            = False
         self._append_mode       = self._editing   # if editor open, this take appends
-        if not self._editing:
-            self._target_element, self._target_app = self._snapshot_focus()
         self.recording    = True
         self.audio_chunks = []
         WAVEFORM_WINDOW.extend([0.02] * WAVEFORM_BINS)
+        # Show the overlay IMMEDIATELY (nothing slow before it).
         self._set_state("recording")
-        self._play_sound("Tink")        # soft start cue
+        self._play_sound("Tink")
         self._overlay.show_async()
         self._overlay.push_state("recording")
-        # Open the mic OFF the main thread — PortAudio open/close can block, and
-        # blocking the main thread freezes the overlay + menu bar.
+        # Focus snapshot + mic open happen off the main thread (both can be slow
+        # on first use and must never delay the overlay).
         threading.Thread(target=self._begin_capture, daemon=True).start()
 
     def _begin_capture(self):
+        # Capture focus here (off main thread) — overlay is non-activating so
+        # focus hasn't moved. This keeps the slow AX query off the hot path.
+        if not self._editing:
+            self._target_element, self._target_app = self._snapshot_focus()
         # NOTE: we no longer reinitialize PortAudio on every recording — doing
         # that repeatedly corrupts its state over a long session ("refuses to
         # record"). _open_stream() refreshes devices only if the open fails.
@@ -893,6 +913,7 @@ class WhisperLocal(rumps.App):
 
     def _force_reset(self):
         """Recover from desynced state (a dropped key event left a flag stuck)."""
+        _klog("FORCE_RESET")
         self._cancelled = True
         self._stop_timeout()
         self._stop_partial_timer()
@@ -980,8 +1001,9 @@ class WhisperLocal(rumps.App):
             if float(np.sqrt(np.mean(tail ** 2))) < 0.004:
                 return  # silence gating
 
+            # Background pass — never restart the worker / touch model_ready.
             result = self._run_transcription_full(
-                tail, self._committed_text, words=True)
+                tail, self._committed_text, words=True, allow_restart=False)
             words = result.get("words", [])
             if not words:
                 return
