@@ -80,6 +80,7 @@ SETTLE_MARGIN   = 0.35  # commit closer to the live edge → snappier + smaller 
 MIN_TAIL_SECS   = 0.35  # minimum audio before a transcription pass
 MAX_TAIL_SECS   = 3.0   # force-commit beyond this so passes stay fast + final pass tiny
 MAX_RECORD_SECS = 300
+KEEPALIVE_SECS  = 25    # ping worker with silence to keep MLX/Metal warm in memory
 
 
 def _slog(msg: str):
@@ -201,6 +202,7 @@ class WhisperLocal(rumps.App):
         self._committed_samples = 0  # audio samples already finalized
         self._prev_words      = []   # last tick's uncommitted hypothesis (normalized)
         self._paused          = False
+        self._keepalive_timer = None   # periodic silent ping to keep worker warm
         self._editing         = False  # review editor open
         self._append_mode     = False  # this recording appends to the open editor
         self._review_produced = ""
@@ -641,6 +643,7 @@ class WhisperLocal(rumps.App):
                 line = self._worker.stdout.readline().strip() if ready else b"TIMEOUT"
             if line == b"READY":
                 self._model_ready = True
+                self._start_keepalive()
                 tag = "🔋 " if self.cfg.get("low_power", False) else ""
                 model_short = model.split("/")[-1]
                 self._set_status(f"MLX ✅  {tag}{model_short} — hold ⌥")
@@ -725,6 +728,39 @@ class WhisperLocal(rumps.App):
             pass
         self._model_ready = False
         threading.Thread(target=self._load_model, daemon=True).start()
+
+    # ------------------------------------------------------------------
+    # Keep-alive — ping the worker periodically so macOS doesn't swap it
+    # out and MLX Metal shaders stay compiled in GPU cache.
+    # ------------------------------------------------------------------
+
+    def _start_keepalive(self):
+        self._stop_keepalive()
+        self._keepalive_timer = threading.Timer(KEEPALIVE_SECS, self._keepalive_tick)
+        self._keepalive_timer.daemon = True
+        self._keepalive_timer.start()
+
+    def _stop_keepalive(self):
+        if self._keepalive_timer:
+            self._keepalive_timer.cancel()
+            self._keepalive_timer = None
+
+    def _keepalive_tick(self):
+        """Send a tiny silent transcription to keep the worker process warm."""
+        if self.recording or self._transcribing or not self._model_ready:
+            self._start_keepalive()
+            return
+        if not self._model_lock.acquire(blocking=False):
+            self._start_keepalive()
+            return
+        try:
+            silence = np.zeros(1600, dtype=np.float32)  # 0.1s @ 16kHz
+            self._run_transcription_full(silence, allow_restart=False)
+        except Exception:
+            pass
+        finally:
+            self._model_lock.release()
+        self._start_keepalive()
 
     # ------------------------------------------------------------------
     # Hotkey listener
@@ -812,6 +848,7 @@ class WhisperLocal(rumps.App):
         self._committed_samples = 0
         self._prev_words        = []
         self._paused            = False
+        self._stop_keepalive()  # no pings while actively recording
         self._append_mode       = self._editing   # if editor open, this take appends
         self.recording    = True
         self.audio_chunks = []
@@ -1108,6 +1145,7 @@ class WhisperLocal(rumps.App):
             print(f"Final paste error: {e}")
         finally:
             self._transcribing = False
+            self._start_keepalive()
             if not self.cfg.get("review", False):
                 self._overlay.push_state("idle")
                 self._overlay.hide_async()

@@ -16,9 +16,9 @@ from Foundation import NSMakePoint, NSObject, NSTimer, NSString
 # ---------------------------------------------------------------------------
 # Layout
 # ---------------------------------------------------------------------------
-PANEL_W_COMPACT = 200    # compact pill: just the waveform
+PANEL_W_COMPACT = 140    # compact pill: just the waveform
 PANEL_W_WIDE    = 540    # (unused in minimal UI)
-PANEL_W         = PANEL_W_WIDE   # max width (used to size the window once)
+PANEL_W         = PANEL_W_COMPACT  # max width (used to size the window once)
 PILL_H     = 38
 MAX_LINES  = 6
 LINE_H     = 20
@@ -201,16 +201,34 @@ class _PillCanvas(NSView):
         cx = pill_x + pill_w / 2
         cy = PILL_H / 2
         if self._state in ("transcribing", "polishing"):
+            self._draw_shimmer(pill_rect)
             self._draw_processing_dots(cx, cy)
         elif self._state == "done":
             self._draw_check(cx, cy)
         else:
             # Recording / idle → waveform centred in the pill, inset to clear
             # the rounded corners.
-            inset = 22
+            inset = 16
             self._draw_waveform(NSMakeRect(pill_x + inset, (PILL_H - 20) / 2,
                                            pill_w - 2 * inset, 20))
         return
+
+    def _draw_shimmer(self, r):
+        """Sweeping highlight across the pill — conveys active processing."""
+        from AppKit import NSGraphicsContext
+        NSGraphicsContext.currentContext().saveGraphicsState()
+        sweep = (self._phase * 0.55) % 1.0
+        band_w = r.size.width * 0.35
+        cx = r.origin.x + sweep * (r.size.width + band_w) - band_w * 0.5
+        clip = NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
+            r, CORNER, CORNER)
+        clip.addClip()
+        for offset, alpha in ((0, 0.08), (-band_w * 0.25, 0.04), (band_w * 0.25, 0.04)):
+            _c(0.45, 0.75, 1.0, alpha).setFill()
+            NSBezierPath.fillRect_(NSMakeRect(
+                cx + offset - band_w * 0.5, r.origin.y,
+                band_w, r.size.height))
+        NSGraphicsContext.currentContext().restoreGraphicsState()
 
     def _draw_processing_dots(self, cx, cy):
         sp = 8.0; dr = 2.6
@@ -389,12 +407,12 @@ class _PillCanvas(NSView):
         xs  = [rect.origin.x + i * w / (n - 1) for i in range(n)]
         amp = h / 2 * 0.85
 
-        # Gentle edge softening — fade to ~55% at the very ends (not to a point),
-        # so the waveform keeps body across the whole pill.
-        taper = 4
+        # Smooth cosine taper — amplitude fades to near-zero at the edges so
+        # the waveform dissolves naturally into the rounded pill corners.
+        taper = max(1, n // 5)  # ~20% of bars on each side
         env = list(base)
         for i in range(taper):
-            f = 0.55 + 0.45 * (i / taper)
+            f = 0.5 * (1 - math.cos(math.pi * i / taper))  # 0→1 cosine ease
             env[i] *= f
             env[-(i + 1)] *= f
 
