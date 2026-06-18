@@ -1,54 +1,23 @@
 #!/bin/bash
-# Fast local update — copies Python sources into the installed app and restarts.
-# Resources is on sys.path (see main.py), so plain .py files here are what load.
+# Fast local update — copies Python sources into the LIVE hot-swap dir that the
+# app actually loads from (~/.whisperlocal/live, via the bundle's bootstrap shim).
+#
+# The signed app bundle is deliberately NOT touched, so its code signature — and
+# therefore the macOS Accessibility grant that lets the app paste — stays valid
+# across every update. No re-signing, no re-granting. (This replaced the old
+# approach of copying into the bundle, which broke the signature every time and
+# silently killed paste.)
 set -e
 APP="/Applications/WhisperLocal.app"
-RES="$APP/Contents/Resources"
+LIVE="$HOME/.whisperlocal/live"
+mkdir -p "$LIVE"
 
-echo "▸ Updating Python sources..."
-cp main.py             "$RES/main.py"
-cp overlay.py          "$RES/overlay.py"
-cp trainer.py          "$RES/trainer.py"
-cp review_editor.py    "$RES/review_editor.py"
-cp transcribe_worker.py "$RES/transcribe_worker.py"
-
-# Remove any stale compiled copy of overlay in the zip so the fresh .py wins
-ZIP=$(ls "$RES/lib/python"*.zip 2>/dev/null || true)
-if [ -n "$ZIP" ]; then
-  python3 - "$ZIP" <<'EOF'
-import sys, zipfile, os
-zip_path = sys.argv[1]
-tmp = zip_path + ".tmp"
-removed = 0
-with zipfile.ZipFile(zip_path) as zin, \
-     zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as zout:
-    for item in zin.infolist():
-        if item.filename == "overlay.pyc":
-            removed += 1
-            continue
-        zout.writestr(item, zin.read(item.filename))
-os.replace(tmp, zip_path)
-if removed:
-    print(f"  removed stale overlay.pyc from zip")
-EOF
-fi
-
-# Clear any cached bytecode
-find "$RES" -name "overlay*.pyc" -not -path "*/lib/*" -delete 2>/dev/null || true
-
-# Re-sign the bundle. Copying .py into a code-signed .app breaks the signature
-# seal, which makes macOS treat the app as "tampered" and SILENTLY revoke its
-# Accessibility grant — paste then stops working with no error or crash. Re-
-# sealing keeps the signature valid so the grant sticks (or can be re-enabled).
-# Top-level only (no --deep): the nested Python.framework is already signed and
-# --deep chokes on it.
-echo "▸ Re-signing bundle (keeps Accessibility/paste working)..."
-if codesign --force --sign - "$APP" 2>/dev/null; then
-  echo "  ✓ re-signed"
-else
-  echo "  ⚠ re-sign FAILED — paste may break until you re-enable WhisperLocal in"
-  echo "    System Settings ▸ Privacy & Security ▸ Accessibility"
-fi
+echo "▸ Updating live Python sources (bundle untouched, signature preserved)..."
+cp main.py              "$LIVE/app_main.py"   # real entry, launched by the shim
+cp overlay.py           "$LIVE/overlay.py"
+cp trainer.py           "$LIVE/trainer.py"
+cp review_editor.py     "$LIVE/review_editor.py"
+cp transcribe_worker.py "$LIVE/transcribe_worker.py"
 
 echo "▸ Restarting WhisperLocal..."
 pkill -9 -x WhisperLocal 2>/dev/null || true
@@ -57,4 +26,4 @@ sleep 1
 # Ensure no stragglers before relaunching (duplicate instances fight over the hotkey)
 while pgrep -x WhisperLocal >/dev/null; do sleep 0.3; done
 open "$APP"
-echo "✓ Done"
+echo "✓ Done (no re-sign needed — Accessibility grant preserved)"

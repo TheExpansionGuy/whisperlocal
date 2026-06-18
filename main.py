@@ -17,8 +17,14 @@ import sounddevice as sd
 from AppKit import NSEvent, NSSound
 from PyObjCTools import AppHelper
 
-# Ensure our bundled Resources dir is importable (for trainer.py)
-if getattr(sys, "frozen", False):
+# Ensure our source dir is importable (trainer.py / review_editor.py / overlay.py).
+# WHISPERLOCAL_SRC is set by the bundle's bootstrap shim to the live hot-swap dir
+# (~/.whisperlocal/live) so updates load WITHOUT modifying the signed bundle —
+# that keeps the code signature (and Accessibility grant) stable across updates.
+# Prefer it; fall back to the bundled Resources, then the dev source dir.
+if os.environ.get("WHISPERLOCAL_SRC"):
+    sys.path.insert(0, os.environ["WHISPERLOCAL_SRC"])
+elif getattr(sys, "frozen", False):
     _res = Path(sys.executable).parent.parent / "Resources"
     if str(_res) not in sys.path:
         sys.path.insert(0, str(_res))
@@ -644,6 +650,10 @@ class WhisperLocal(rumps.App):
         return sys.executable
 
     def _worker_script(self) -> str:
+        # Prefer the live hot-swap copy so worker updates land without re-signing.
+        src = os.environ.get("WHISPERLOCAL_SRC")
+        if src and (Path(src) / "transcribe_worker.py").is_file():
+            return str(Path(src) / "transcribe_worker.py")
         if getattr(sys, "frozen", False):
             return str(Path(sys.executable).parent.parent / "Resources" / "transcribe_worker.py")
         return str(Path(__file__).parent / "transcribe_worker.py")
@@ -1154,17 +1164,32 @@ class WhisperLocal(rumps.App):
 
             # Start from committed text; try to transcribe the small remaining tail.
             final = self._committed_text
+            committed_secs = self._committed_samples / SAMPLE_RATE
+            tail_secs = 0.0
+            t_final = 0.0
             try:
                 with self._model_lock:
                     if self.audio_chunks:
                         audio = np.concatenate(self.audio_chunks).flatten()
                         tail = audio[self._committed_samples:]
+                        tail_secs = len(tail) / SAMPLE_RATE
                         if len(tail) >= int(SAMPLE_RATE * 0.2):
+                            _t0 = time.time()
                             text = self._run_transcription(tail, self._committed_text)
+                            t_final = time.time() - _t0
                             if text:
                                 final = (self._committed_text + " " + text).strip()
             except Exception as e:
                 print(f"Final transcription error (using committed text): {e}")
+            # Diagnostic: how much streaming committed vs. how big/slow the final
+            # pass was. If committed≈0 and final_tail≈whole clip, streaming isn't
+            # keeping up; if final_pass dominates, the model is the bottleneck.
+            try:
+                with open(Path.home()/".whisperlocal"/"debug.log","a") as f:
+                    f.write(f"[timing] committed={committed_secs:.2f}s "
+                            f"final_tail={tail_secs:.2f}s final_pass={t_final:.2f}s\n")
+            except Exception:
+                pass
 
             final = _collapse_repeats(final.strip())
             final = _apply_corrections(final)

@@ -72,5 +72,20 @@ echo "▸ Installing to /Applications (clean replace)…"
 rm -rf /Applications/WhisperLocal.app
 cp -r dist/WhisperLocal.app /Applications/
 
+# Install the bootstrap shim so the app loads hot-swappable code from
+# ~/.whisperlocal/live, keeping the signed bundle immutable. That's what lets the
+# Accessibility grant survive update.sh runs. See update.sh / bundle_main_shim.py.
+echo "▸ Installing bootstrap shim + seeding live dir…"
+RESI="/Applications/WhisperLocal.app/Contents/Resources"
+cp main.py "$RESI/app_main.py"            # bundled fallback of the real entry
+cp bundle_main_shim.py "$RESI/main.py"    # shim becomes the bundle entry point
+LIVE="$HOME/.whisperlocal/live"; mkdir -p "$LIVE"
+cp main.py "$LIVE/app_main.py"
+cp overlay.py trainer.py review_editor.py transcribe_worker.py "$LIVE/"
+
+echo "▸ Signing bundle (once; live updates afterward never modify it)…"
+codesign --force --sign - /Applications/WhisperLocal.app 2>/dev/null && echo "  signed"
+
 echo ""
 echo "✓ Built and installed: /Applications/WhisperLocal.app"
+echo "  → Grant Accessibility once in System Settings; it persists across update.sh runs."
