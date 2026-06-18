@@ -36,6 +36,20 @@ fi
 # Clear any cached bytecode
 find "$RES" -name "overlay*.pyc" -not -path "*/lib/*" -delete 2>/dev/null || true
 
+# Re-sign the bundle. Copying .py into a code-signed .app breaks the signature
+# seal, which makes macOS treat the app as "tampered" and SILENTLY revoke its
+# Accessibility grant — paste then stops working with no error or crash. Re-
+# sealing keeps the signature valid so the grant sticks (or can be re-enabled).
+# Top-level only (no --deep): the nested Python.framework is already signed and
+# --deep chokes on it.
+echo "▸ Re-signing bundle (keeps Accessibility/paste working)..."
+if codesign --force --sign - "$APP" 2>/dev/null; then
+  echo "  ✓ re-signed"
+else
+  echo "  ⚠ re-sign FAILED — paste may break until you re-enable WhisperLocal in"
+  echo "    System Settings ▸ Privacy & Security ▸ Accessibility"
+fi
+
 echo "▸ Restarting WhisperLocal..."
 pkill -9 -x WhisperLocal 2>/dev/null || true
 pkill -9 -f transcribe_worker 2>/dev/null || true

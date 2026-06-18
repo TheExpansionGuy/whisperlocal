@@ -110,10 +110,17 @@ def _install_crash_logging():
         import traceback
         logdir = Path.home() / ".whisperlocal"
         logdir.mkdir(parents=True, exist_ok=True)
-        f = open(logdir / "crash.log", "a", buffering=1)  # line-buffered
+        f = open(logdir / "crash.log", "a", buffering=1,   # line-buffered
+                 encoding="utf-8", errors="replace")
         sys.stdout = f          # these currently go to /dev/null under `open`
         sys.stderr = f
         f.write(f"\n=== launch {time.time():.1f} pid={os.getpid()} ===\n")
+        try:
+            import ApplicationServices as _AS
+            f.write(f"AXIsProcessTrusted={_AS.AXIsProcessTrusted()}  "
+                    f"(False means keystroke paste is silently blocked)\n")
+        except Exception as _e:
+            f.write(f"AX trust check failed: {_e}\n")
         faulthandler.enable(file=f)
 
         def _hook(exc_type, exc, tb):
@@ -1323,6 +1330,22 @@ class WhisperLocal(rumps.App):
                 pass
 
 
+def _ensure_accessibility():
+    """Keystroke paste (pynput ⌘V / direct typing) requires Accessibility
+    permission. Without it macOS silently drops the synthetic keystrokes — the
+    app transcribes fine but nothing ever pastes, with no error. If the grant is
+    missing, prompt once so the app is added to the Accessibility list and the
+    user can enable it. (Hotkey *detection* uses Input Monitoring, a separate
+    grant, which is why the app can still hear the hotkey but not type.)"""
+    try:
+        import ApplicationServices as AS
+        if not AS.AXIsProcessTrusted():
+            AS.AXIsProcessTrustedWithOptions({"AXTrustedCheckOptionPrompt": True})
+    except Exception:
+        pass
+
+
 if __name__ == "__main__":
     _install_crash_logging()
+    _ensure_accessibility()
     WhisperLocal().run()
