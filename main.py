@@ -50,6 +50,7 @@ DEFAULTS = {"model": "mlx-community/whisper-small.en-mlx", "filler_removal": Tru
             "personalize": True, "review": False, "history": []}
 
 LOW_POWER_MODEL = "mlx-community/whisper-base.en-mlx"  # lighter model when low-power on
+STREAM_MODEL    = "mlx-community/whisper-small.en-mlx"  # fast model for live streaming passes only
 HISTORY_MAX = 10
 
 FILLER_RE = re.compile(
@@ -262,6 +263,11 @@ class WhisperLocal(rumps.App):
         self._prev_words      = []   # last tick's uncommitted hypothesis (normalized)
         self._paused          = False
         self._keepalive_timer = None   # periodic silent ping to keep worker warm
+        self._stream_lock          = threading.Lock()
+        self._stream_restart_lock  = threading.Lock()
+        self._stream_restarting    = False
+        self._stream_ready         = False
+        self._swerr                = None
         self._editing         = False  # review editor open
         self._append_mode     = False  # this recording appends to the open editor
         self._review_produced = ""
@@ -276,6 +282,7 @@ class WhisperLocal(rumps.App):
         self._build_menu()
         self._request_accessibility()
         threading.Thread(target=self._load_model, daemon=True).start()
+        threading.Thread(target=self._load_stream_worker, daemon=True).start()
         self._start_listener()
 
     # ------------------------------------------------------------------
@@ -627,6 +634,11 @@ class WhisperLocal(rumps.App):
                 self._worker.terminate()
         except Exception:
             pass
+        try:
+            if hasattr(self, "_stream_worker") and self._stream_worker and self._stream_worker.poll() is None:
+                self._stream_worker.terminate()
+        except Exception:
+            pass
         rumps.quit_application()
 
     # ------------------------------------------------------------------
@@ -683,6 +695,89 @@ class WhisperLocal(rumps.App):
                 self._werr = subprocess.DEVNULL
         return self._werr
 
+    def _stream_worker_stderr(self):
+        """Log file for the streaming (small-model) worker's stderr."""
+        if self._swerr is None:
+            try:
+                self._swerr = open(Path.home() / ".whisperlocal" / "stream_worker.log",
+                                   "a", buffering=1)
+            except Exception:
+                self._swerr = subprocess.DEVNULL
+        return self._swerr
+
+    def _load_stream_worker(self):
+        """Start the small-model streaming worker (parallel to the final worker).
+        Runs during recording to keep the committed-text tail short so the final
+        pass on release is tiny — and therefore fast."""
+        try:
+            with self._stream_lock:
+                if hasattr(self, "_stream_worker") and self._stream_worker and self._stream_worker.poll() is None:
+                    try:
+                        self._stream_worker.terminate()
+                    except Exception:
+                        pass
+                self._stream_worker = subprocess.Popen(
+                    [self._venv_python(), self._worker_script(), STREAM_MODEL, "en"],
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=self._stream_worker_stderr(),
+                    env=self._worker_env(),
+                )
+                ready, _, _ = select.select([self._stream_worker.stdout], [], [], 180)
+                line = self._stream_worker.stdout.readline().strip() if ready else b"TIMEOUT"
+            if line == b"READY":
+                self._stream_ready = True
+            elif line.startswith(b"ERROR:"):
+                raise RuntimeError(line.decode())
+            else:
+                raise RuntimeError(f"Unexpected: {line[:80]}")
+        except Exception as e:
+            print(f"Stream worker start error: {e}")
+        finally:
+            self._stream_restarting = False
+
+    def _run_stream_transcription_full(self, audio: np.ndarray, prompt: str = "",
+                                       words: bool = False) -> dict:
+        """Send audio to the small streaming worker. On any failure, restarts it
+        async (independent of the final worker) and returns empty."""
+        empty = {"text": "", "words": [], "segments": []}
+        if not hasattr(self, "_stream_worker") or self._stream_worker is None or self._stream_worker.poll() is not None:
+            self._restart_stream_worker_async()
+            return empty
+        try:
+            data = audio.tobytes()
+            header = json.dumps(
+                {"n": len(data), "prompt": prompt[-200:],
+                 "words": words, "segments": False}).encode()
+            self._stream_worker.stdin.write(header + b"\n" + data)
+            self._stream_worker.stdin.flush()
+            ready, _, _ = select.select([self._stream_worker.stdout], [], [], 10)
+            if not ready:
+                self._restart_stream_worker_async()
+                return empty
+            line = self._stream_worker.stdout.readline()
+            if not line.strip():
+                return empty
+            return json.loads(line.strip())
+        except Exception as e:
+            print(f"Stream transcription error: {e}")
+            self._restart_stream_worker_async()
+            return empty
+
+    def _restart_stream_worker_async(self):
+        """Idempotent async restart for the streaming worker (mirrors _restart_worker_async)."""
+        with self._stream_restart_lock:
+            if self._stream_restarting:
+                return
+            self._stream_restarting = True
+        try:
+            if hasattr(self, "_stream_worker") and self._stream_worker and self._stream_worker.poll() is None:
+                self._stream_worker.kill()
+        except Exception:
+            pass
+        self._stream_ready = False
+        threading.Thread(target=self._load_stream_worker, daemon=True).start()
+
     def _worker_env(self) -> dict:
         venv_python = self._venv_python()
         env = {
@@ -724,7 +819,9 @@ class WhisperLocal(rumps.App):
                 self._start_keepalive()
                 tag = "🔋 " if self.cfg.get("low_power", False) else ""
                 model_short = model.split("/")[-1]
-                self._set_status(f"MLX ✅  {tag}{model_short} — hold ⌥")
+                stream_short = STREAM_MODEL.split("/")[-1]
+                dual = f"{stream_short}+{model_short}" if model != STREAM_MODEL else model_short
+                self._set_status(f"MLX ✅  {tag}{dual} — hold ⌥")
             elif line.startswith(b"ERROR:"):
                 raise RuntimeError(line.decode())
             else:
@@ -1125,9 +1222,10 @@ class WhisperLocal(rumps.App):
         """Background word-level streaming (no live display): commit words two
         consecutive passes agree on, advancing the committed point so the tail
         stays small — that's what makes the final paste on release quick.
-        LocalAgreement-2 commits reliably (proven in logs)."""
-        if not self._model_lock.acquire(blocking=False):
-            return  # a transcription is already in flight; skip this tick
+        LocalAgreement-2 commits reliably (proven in logs).
+        Uses the small streaming worker so the medium final worker stays free."""
+        if not self._stream_lock.acquire(blocking=False):
+            return  # a streaming pass is already in flight; skip this tick
         try:
             if not self.audio_chunks:
                 return
@@ -1139,9 +1237,9 @@ class WhisperLocal(rumps.App):
             if float(np.sqrt(np.mean(tail ** 2))) < 0.004:
                 return  # silence gating
 
-            # Background pass — never restart the worker / touch model_ready.
-            result = self._run_transcription_full(
-                tail, self._committed_text, words=True, allow_restart=False)
+            # Use the small stream worker (fast; final worker stays free for paste).
+            result = self._run_stream_transcription_full(
+                tail, self._committed_text, words=True)
             words = result.get("words", [])
             if not words:
                 return
@@ -1169,7 +1267,7 @@ class WhisperLocal(rumps.App):
         except Exception as e:
             print(f"Chunk error: {e}")
         finally:
-            self._model_lock.release()
+            self._stream_lock.release()
 
     def _transcribe_final(self):
         """On release: transcribe the remaining tail, append, optionally clean up, paste.
