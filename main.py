@@ -105,6 +105,16 @@ def _klog(msg: str):
         pass
 
 
+def _dbg(msg: str):
+    """Append a flushed marker to debug.log immediately. Used to trace the
+    finalize phases so a hang leaves the last-reached phase on disk."""
+    try:
+        with open(Path.home() / ".whisperlocal" / "debug.log", "a") as f:
+            f.write(f"{msg} {time.time():.1f}\n")
+    except Exception:
+        pass
+
+
 def _install_crash_logging():
     """Diagnostic only — no behaviour change. The app is launched via `open`, so
     stdout/stderr go nowhere and a Python-level exit leaves no native crash
@@ -1166,7 +1176,13 @@ class WhisperLocal(rumps.App):
         Paste is bulletproof — any error in transcription/cleanup still pastes what we have."""
         try:
             t_start = time.time()
-            self._close_stream()   # stop the mic off the main thread
+            _dbg("[phase] enter")
+            # Close the mic in the BACKGROUND. PortAudio's stop()/close() can wedge
+            # with no timeout, and we already have the audio (recording is False, so
+            # the callback drops anything new) — so there's no reason to wait. Doing
+            # it synchronously here is what froze finalize on the bouncing dots until
+            # you had to force-quit. Fire-and-forget so the paste never gates on it.
+            threading.Thread(target=self._close_stream, daemon=True).start()
             t_closed = time.time()
             try:
                 n = len(self.audio_chunks)
@@ -1189,6 +1205,7 @@ class WhisperLocal(rumps.App):
                 _t_pre_lock = time.time()
                 with self._model_lock:
                     lock_wait = time.time() - _t_pre_lock   # waiting on an in-flight streaming pass
+                    _dbg("[phase] locked")
                     if self.audio_chunks:
                         audio = np.concatenate(self.audio_chunks).flatten()
                         tail = audio[self._committed_samples:]
@@ -1197,6 +1214,7 @@ class WhisperLocal(rumps.App):
                             _t0 = time.time()
                             text = self._run_transcription(tail, self._committed_text)
                             t_final = time.time() - _t0
+                            _dbg("[phase] transcribed")
                             if text:
                                 final = (self._committed_text + " " + text).strip()
             except Exception as e:
