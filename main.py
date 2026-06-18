@@ -658,6 +658,21 @@ class WhisperLocal(rumps.App):
             return str(Path(sys.executable).parent.parent / "Resources" / "transcribe_worker.py")
         return str(Path(__file__).parent / "transcribe_worker.py")
 
+    def _worker_stderr(self):
+        """A real file for the worker's stderr — NEVER a pipe. An unread stderr
+        PIPE fills its 64KB OS buffer (mlx noise across the many streaming passes)
+        and the worker then BLOCKS on its next stderr write — it looks
+        'unresponsive', triggers a restart, and the restart's model reload (16-21s
+        on medium) holds the model lock, stalling the next dictation. A file never
+        blocks and keeps worker errors visible for debugging."""
+        if getattr(self, "_werr", None) is None:
+            try:
+                self._werr = open(Path.home() / ".whisperlocal" / "worker.log",
+                                  "a", buffering=1)
+            except Exception:
+                self._werr = subprocess.DEVNULL
+        return self._werr
+
     def _worker_env(self) -> dict:
         venv_python = self._venv_python()
         env = {
@@ -688,7 +703,7 @@ class WhisperLocal(rumps.App):
                     [self._venv_python(), self._worker_script(), model, "en"],
                     stdin=subprocess.PIPE,
                     stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
+                    stderr=self._worker_stderr(),   # a FILE, not an unread PIPE
                     env=self._worker_env(),
                 )
                 # Wait for READY with a generous timeout (first run downloads the model)
@@ -1150,7 +1165,9 @@ class WhisperLocal(rumps.App):
         """On release: transcribe the remaining tail, append, optionally clean up, paste.
         Paste is bulletproof — any error in transcription/cleanup still pastes what we have."""
         try:
+            t_start = time.time()
             self._close_stream()   # stop the mic off the main thread
+            t_closed = time.time()
             try:
                 n = len(self.audio_chunks)
                 samples = sum(len(c) for c in self.audio_chunks) if self.audio_chunks else 0
@@ -1167,8 +1184,11 @@ class WhisperLocal(rumps.App):
             committed_secs = self._committed_samples / SAMPLE_RATE
             tail_secs = 0.0
             t_final = 0.0
+            lock_wait = 0.0
             try:
+                _t_pre_lock = time.time()
                 with self._model_lock:
+                    lock_wait = time.time() - _t_pre_lock   # waiting on an in-flight streaming pass
                     if self.audio_chunks:
                         audio = np.concatenate(self.audio_chunks).flatten()
                         tail = audio[self._committed_samples:]
@@ -1181,13 +1201,15 @@ class WhisperLocal(rumps.App):
                                 final = (self._committed_text + " " + text).strip()
             except Exception as e:
                 print(f"Final transcription error (using committed text): {e}")
-            # Diagnostic: how much streaming committed vs. how big/slow the final
-            # pass was. If committed≈0 and final_tail≈whole clip, streaming isn't
-            # keeping up; if final_pass dominates, the model is the bottleneck.
+            # Full release→paste breakdown. close = mic stop; lock_wait = blocked on
+            # an in-flight streaming pass; final_pass = the real transcription;
+            # total = release to here (paste is ~0.2s more).
             try:
                 with open(Path.home()/".whisperlocal"/"debug.log","a") as f:
                     f.write(f"[timing] committed={committed_secs:.2f}s "
-                            f"final_tail={tail_secs:.2f}s final_pass={t_final:.2f}s\n")
+                            f"final_tail={tail_secs:.2f}s close={t_closed-t_start:.2f}s "
+                            f"lock_wait={lock_wait:.2f}s final_pass={t_final:.2f}s "
+                            f"total={time.time()-t_start:.2f}s\n")
             except Exception:
                 pass
 
