@@ -99,6 +99,40 @@ def _klog(msg: str):
         pass
 
 
+def _install_crash_logging():
+    """Diagnostic only — no behaviour change. The app is launched via `open`, so
+    stdout/stderr go nowhere and a Python-level exit leaves no native crash
+    report. Tee both streams to ~/.whisperlocal/crash.log and record any uncaught
+    exception (main thread, background threads, and native faults) so a crash can
+    actually be read afterwards instead of guessed at."""
+    try:
+        import faulthandler
+        import traceback
+        logdir = Path.home() / ".whisperlocal"
+        logdir.mkdir(parents=True, exist_ok=True)
+        f = open(logdir / "crash.log", "a", buffering=1)  # line-buffered
+        sys.stdout = f          # these currently go to /dev/null under `open`
+        sys.stderr = f
+        f.write(f"\n=== launch {time.time():.1f} pid={os.getpid()} ===\n")
+        faulthandler.enable(file=f)
+
+        def _hook(exc_type, exc, tb):
+            f.write(f"\n!!! UNCAUGHT (main) {time.time():.1f}\n")
+            traceback.print_exception(exc_type, exc, tb, file=f)
+            f.flush()
+        sys.excepthook = _hook
+
+        if hasattr(threading, "excepthook"):
+            def _thook(args):
+                f.write(f"\n!!! UNCAUGHT (thread {args.thread.name}) {time.time():.1f}\n")
+                traceback.print_exception(args.exc_type, args.exc_value,
+                                          args.exc_traceback, file=f)
+                f.flush()
+            threading.excepthook = _thook
+    except Exception:
+        pass
+
+
 def _collapse_repeats(text: str) -> str:
     """Collapse runs of 3+ identical consecutive words to a single one.
     Guards against Whisper's repetition hallucination ('the the the the')."""
@@ -1290,4 +1324,5 @@ class WhisperLocal(rumps.App):
 
 
 if __name__ == "__main__":
+    _install_crash_logging()
     WhisperLocal().run()
