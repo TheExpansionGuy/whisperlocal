@@ -191,6 +191,8 @@ class WhisperLocal(rumps.App):
         self.stream = None
         self._kb = keyboard.Controller()
         self._model_lock     = threading.Lock()
+        self._restart_lock   = threading.Lock()  # guards the _restarting flag
+        self._restarting     = False  # a worker reload is in flight (don't stack another)
         self._partial_timer  = None
         self._timeout_timer  = None
         self._cancelled      = False
@@ -654,6 +656,8 @@ class WhisperLocal(rumps.App):
         except Exception as e:
             print(f"Worker start error: {e}")
             self._set_status(f"MLX ❌ {str(e)[:60]}")
+        finally:
+            self._restarting = False  # reload finished — allow future restarts
         self._set_state("idle")
 
     def _run_transcription(self, audio: np.ndarray, prompt: str = "") -> str:
@@ -662,7 +666,7 @@ class WhisperLocal(rumps.App):
 
     def _run_cleanup(self, text: str) -> str:
         """Send text to the worker's LLM cleanup. Returns cleaned text (or original)."""
-        if not hasattr(self, "_worker") or self._worker.poll() is not None:
+        if not hasattr(self, "_worker") or self._worker is None or self._worker.poll() is not None:
             return text
         try:
             examples = trainer.few_shot_examples(3)
@@ -670,6 +674,15 @@ class WhisperLocal(rumps.App):
                 header = json.dumps({"cleanup": text, "examples": examples}).encode()
                 self._worker.stdin.write(header + b"\n")
                 self._worker.stdin.flush()
+                # Bounded wait — the LLM (incl. a cold first-call load) is slow, but
+                # must never block forever holding the lock (the old no-timeout read
+                # here was a hard deadlock). On timeout, restart so the unread reply
+                # can't desync the next request.
+                ready, _, _ = select.select([self._worker.stdout], [], [], 90)
+                if not ready:
+                    print("cleanup unresponsive — restarting worker")
+                    self._restart_worker_async()
+                    return text
                 line = self._worker.stdout.readline()
             if not line.strip():
                 return text
@@ -678,20 +691,24 @@ class WhisperLocal(rumps.App):
             print(f"LLM cleanup took {secs:.2f}s")
             return resp.get("text", text)
         except Exception as e:
-            print(f"Cleanup error: {e}")
+            print(f"Cleanup error: {e}; restarting worker")
+            self._restart_worker_async()
             return text
 
     def _run_transcription_full(self, audio: np.ndarray, prompt: str = "",
                                 words: bool = False, segments: bool = False,
                                 allow_restart: bool = True) -> dict:
         """Send audio to worker, return {'text', optionally 'words'/'segments'}.
-        `allow_restart` is False for background streaming passes — a flaky live
-        pass must NOT kill the worker or flip _model_ready (that's what caused
-        recordings to drop and the hotkey to need extra presses)."""
+        Any failure — dead worker, response timeout, or broken pipe — restarts the
+        worker. A timed-out request's reply would otherwise arrive later and be read
+        by the *next* request, permanently desyncing the pipe (the root of "stuck on
+        transcribing forever"). Restarting is safe even mid-recording: the mic stream
+        and audio_chunks are independent of the worker, so no audio is lost.
+        (`allow_restart` is kept for call-site intent, but failures now always
+        restart — a wedged pipe must be cleared, never carried forward.)"""
         empty = {"text": "", "words": [], "segments": []}
         if not hasattr(self, "_worker") or self._worker is None or self._worker.poll() is not None:
-            if allow_restart:
-                self._restart_worker_async()
+            self._restart_worker_async()
             return empty
         try:
             data = audio.tobytes()
@@ -703,23 +720,31 @@ class WhisperLocal(rumps.App):
             # Wait for a response with a timeout — never block forever.
             ready, _, _ = select.select([self._worker.stdout], [], [], 25)
             if not ready:
-                if allow_restart:
-                    print("worker unresponsive — restarting")
-                    self._restart_worker_async()
+                # Worker wedged: kill+restart so its eventual reply can't poison
+                # the next request's read and desync the pipe.
+                print("worker unresponsive — restarting")
+                self._restart_worker_async()
                 return empty
             line = self._worker.stdout.readline()
             if not line.strip():
                 return empty
             return json.loads(line.strip())
         except Exception as e:
-            if allow_restart:
-                print(f"Transcription error: {e}; restarting worker")
-                self._restart_worker_async()
+            print(f"Transcription error: {e}; restarting worker")
+            self._restart_worker_async()
             return empty
 
     def _restart_worker_async(self):
         """Kill any wedged worker and start a fresh one (off-thread, no deadlock).
-        _load_model waits for the model lock, so it runs once the caller releases."""
+        _load_model waits for the model lock, so it runs once the caller releases.
+        Idempotent: if a reload is already in flight, callers that notice the dead
+        worker in the meantime must NOT stack a second reload (that races _load_model
+        and churns the worker / flaps _model_ready — the cause of extra hotkey
+        presses). _load_model clears _restarting when it finishes."""
+        with self._restart_lock:
+            if self._restarting:
+                return
+            self._restarting = True
         _klog("WORKER_RESTART")
         try:
             if hasattr(self, "_worker") and self._worker and self._worker.poll() is None:
